@@ -1,0 +1,17 @@
+using Microsoft.AspNetCore.Builder;
+
+// ReSharper disable UnusedMethodReturnValue.Global -- Qodana C6 (#9039): fluent
+// IApplicationBuilder extension-method pattern; chained return value is by design, not always used.
+namespace ChurchBulletin.ServiceDefaults;
+
+/// <summary>
+/// Registers correlation identifier middleware on the HTTP pipeline.
+/// </summary>
+public static class CorrelationIdMiddlewareExtensions
+{
+    /// <summary>
+    /// Adds middleware that assigns or forwards <c>X-Correlation-ID</c>, adds it to logging scopes and the current <see cref="System.Diagnostics.Activity"/> when present.
+    /// </summary>
+    public static IApplicationBuilder UseCorrelationId(this IApplicationBuilder app) =>
+        app.UseMiddleware<CorrelationIdMiddleware>();
+}

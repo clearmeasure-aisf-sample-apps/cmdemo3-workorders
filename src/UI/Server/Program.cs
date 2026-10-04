@@ -1,0 +1,2 @@
+
+await ServerApplication.RunAsync(args);

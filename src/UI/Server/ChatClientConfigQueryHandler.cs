@@ -1,0 +1,25 @@
+﻿using ClearMeasure.Bootcamp.LlmGateway;
+using MediatR;
+
+namespace ClearMeasure.Bootcamp.UI.Server;
+
+public class ChatClientConfigQueryHandler(IConfiguration configuration, ILogger<ChatClientConfigQueryHandler> logger)
+    : IRequestHandler<ChatClientConfigQuery, ChatClientConfig>
+{
+    public Task<ChatClientConfig> Handle(ChatClientConfigQuery request, CancellationToken cancellationToken)
+    {
+        var apiKey = configuration.GetValue<string>("AI_OpenAI_ApiKey");
+        logger.LogDebug("AI_OpenAI_ApiKey configured: {Configured}", !string.IsNullOrEmpty(apiKey));
+        var openAiUrl = configuration.GetValue<string>("AI_OpenAI_Url");
+        logger.LogDebug("AI_OpenAI_Url found as {Url}", openAiUrl);
+        var openAiModel = configuration.GetValue<string>("AI_OpenAI_Model");
+        logger.LogDebug("AI_OpenAI_Model found as {Model}", openAiModel);
+
+        return Task.FromResult(new ChatClientConfig
+        {
+            AiOpenAiApiKey = apiKey, 
+            AiOpenAiUrl = openAiUrl, 
+            AiOpenAiModel = openAiModel
+        });
+    }
+}

@@ -1,0 +1,835 @@
+using System.Text.RegularExpressions;
+using ClearMeasure.Bootcamp.UI.Shared;
+using ClearMeasure.Bootcamp.UI.Shared.Pages;
+
+namespace ClearMeasure.Bootcamp.AcceptanceTests.WorkOrders;
+
+public class WorkOrderSearchTests : AcceptanceTestBase
+{
+    [SetUp]
+    public async Task Setup()
+    {
+        await LoginAsCurrentUser();
+    }
+
+    [Test, Retry(2)]
+    public async Task Should_PreserveMixedCaseNames_InWorkOrderSearchDropdowns()
+    {
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+
+        await Expect(creatorSelect.Locator("option").Filter(new() { HasText = "Timothy Lovejoy" })).ToHaveCountAsync(1);
+        await Expect(assigneeSelect.Locator("option").Filter(new() { HasText = "Timothy Lovejoy" })).ToHaveCountAsync(1);
+
+        var creatorTexts = await creatorSelect.Locator("option").AllInnerTextsAsync();
+        var assigneeTexts = await assigneeSelect.Locator("option").AllInnerTextsAsync();
+
+        creatorTexts.ShouldNotContain("TIMOTHY LOVEJOY JR");
+        assigneeTexts.ShouldNotContain("TIMOTHY LOVEJOY JR");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldAssociateFilterLabelsWithSelectIds()
+    {
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        await Expect(Page.Locator($"label[for='{WorkOrderSearch.Elements.CreatorSelect}']")).ToBeAttachedAsync();
+        await Expect(Page.Locator($"label[for='{WorkOrderSearch.Elements.AssigneeSelect}']")).ToBeAttachedAsync();
+        await Expect(Page.Locator($"label[for='{WorkOrderSearch.Elements.StatusSelect}']")).ToBeAttachedAsync();
+
+        await Expect(Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}")).ToBeVisibleAsync();
+        await Expect(Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}")).ToBeVisibleAsync();
+        await Expect(Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}")).ToBeVisibleAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldLoadDropDownsInitiallyOnLoad()
+    {
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "PageLoaded");
+
+        // Assert
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+
+        await Expect(creatorSelect).ToBeVisibleAsync();
+        await Expect(assigneeSelect).ToBeVisibleAsync();
+        await Expect(statusSelect).ToBeVisibleAsync();
+
+        // Employee count varies due to parallel test execution creating users dynamically.
+        // Assert minimum count (base data has ~18 employees) plus "All" option.
+        const int minimumBaseEmployees = 18;
+        var creatorOptions = creatorSelect.Locator("option");
+        await Expect(creatorOptions.First).ToHaveTextAsync("All");
+        // Wait for employee data to finish loading via auto-retrying assertion
+        await Expect(creatorOptions.Filter(new(){ HasText = "Timothy Lovejoy"})).ToHaveCountAsync(1);
+        var creatorOptionCount = await creatorOptions.CountAsync();
+        creatorOptionCount.ShouldBeGreaterThanOrEqualTo(minimumBaseEmployees + 1);
+
+        var assigneeOptions = assigneeSelect.Locator("option");
+        await Expect(assigneeOptions.First).ToHaveTextAsync("All");
+        // Wait for employee data to finish loading via auto-retrying assertion
+        await Expect(assigneeOptions.Filter(new(){ HasText = "Timothy Lovejoy"})).ToHaveCountAsync(1);
+        var assigneeOptionCount = await assigneeOptions.CountAsync();
+        assigneeOptionCount.ShouldBeGreaterThanOrEqualTo(minimumBaseEmployees + 1);
+
+        // Verify status options are loaded (5 statuses + "All" option = 6 options)
+        var statusOptions = statusSelect.Locator("option");
+        await Expect(statusOptions).ToHaveCountAsync(WorkOrderStatus.GetAllItems().Length + 1);
+        await Expect(statusOptions.First).ToHaveTextAsync("All");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldLoadWorkOrderTableWithAllFiltersSetToAllOnInitialLoad()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var assignee = Faker<Employee>();
+        var order1 = Faker<WorkOrder>();
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = creator;
+        order1.Assignee = assignee;
+        order2.Creator = creator;
+        order2.Assignee = assignee;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(assignee);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "InitialLoad");
+
+        // Assert
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        var workOrderRows = workOrderTable.Locator("tbody tr");
+        var rowCount = await workOrderRows.CountAsync();
+        await Expect(workOrderRows).ToHaveCountAsync(rowCount);
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldLoadWorkOrderTableWithCreatorFilterFromQueryString()
+    {
+        // Arrange
+        var creator = CurrentUser;
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Title = $"[{TestTag}] search test";
+        await using var context = TestHost.NewDbContext();
+        context.Attach(creator);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.MyWorkOrders));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "CreatorFiltered");
+
+        // Assert
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await Expect(creatorSelect).ToHaveValueAsync(creator.UserName);
+
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        var workOrderRows = workOrderTable.Locator("tbody tr");
+        var rowCount = await workOrderRows.CountAsync();
+        rowCount.ShouldBeGreaterThanOrEqualTo(1);
+        await Expect(workOrderRows.First.Locator("td:nth-child(2)")).ToContainTextAsync(creator.GetFullName());
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldLoadWorkOrderTableWithAssigneeFilterFromQueryString()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var assignee = CurrentUser;
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Assignee = assignee;
+        order.Title = $"[{TestTag}] assignee test";
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Attach(assignee);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.WorkOrdersAssignedToMe));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "AssigneeFiltered");
+
+        // Assert
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        await Expect(assigneeSelect).ToHaveValueAsync(assignee.UserName);
+
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        var workOrderRows = workOrderTable.Locator("tbody tr");
+        var rowCount = await workOrderRows.CountAsync();
+        rowCount.ShouldBeGreaterThanOrEqualTo(1);
+        await Expect(workOrderRows.First.Locator("td:nth-child(3)")).ToContainTextAsync(assignee.GetFullName());
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldLoadWorkOrderTableWithStatusFilterFromQueryString()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var status = WorkOrderStatus.Assigned;
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Status = status;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.AllAssignedWorkOrders));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "StatusFiltered");
+
+        // Assert
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+        await Expect(statusSelect).ToHaveValueAsync(status.Key);
+
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        var workOrderRows = workOrderTable.Locator("tbody tr");
+        await Expect(workOrderRows).ToHaveCountAsync(await workOrderRows.CountAsync());
+        await Expect(workOrderRows.First.Locator("td:nth-child(4)")).ToContainTextAsync(status.FriendlyName);
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldSearchWithAllThreeFiltersSelected()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var assignee = Faker<Employee>();
+        var status = Faker<WorkOrderStatus>();
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Assignee = assignee;
+        order.Status = status;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(assignee);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "BeforeFiltering");
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        await assigneeSelect.SelectOptionAsync(assignee.UserName);
+        await statusSelect.SelectOptionAsync(status.Key);
+        await TakeScreenshotAsync(2, "FiltersSet");
+
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(3, "SearchCompleted");
+
+        // Assert
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        // Wait for the table body to update with filtered results
+        await workOrderTable.Locator("tbody").WaitForAsync();
+        
+        var workOrderRows = workOrderTable.Locator("tbody tr");
+        await Expect(workOrderRows).ToHaveCountAsync(1);
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldNavigateToWorkOrderDetailsWhenClickingWorkOrderNumber()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var workOrder = Faker<WorkOrder>();
+        workOrder.Creator = creator;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(workOrder);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "SearchPageLoaded");
+
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+
+        var firstWorkOrderLink = workOrderTable.Locator("tbody tr").First.Locator("td").First.Locator("a");
+        var workOrderNumber = await firstWorkOrderLink.TextContentAsync();
+
+        if (!string.IsNullOrEmpty(workOrderNumber))
+        {
+            await firstWorkOrderLink.ClickAsync();
+            await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+            await TakeScreenshotAsync(2, "WorkOrderDetailsPage");
+
+            // Assert
+            await Expect(Page).ToHaveURLAsync(new Regex($"/workorder/manage/{Regex.Escape(workOrderNumber)}"));
+        }
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldClearFiltersWhenSelectingAllOption()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+
+        // First set a filter
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "FilterSet");
+
+        // Then clear it by selecting "All"
+        await creatorSelect.SelectOptionAsync("");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "FilterCleared");
+
+        // Assert
+        await Expect(creatorSelect).ToHaveValueAsync("");
+
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldMaintainSelectedFiltersAfterSearch()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var assignee = Faker<Employee>();
+        var status = Faker<WorkOrderStatus>();
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Assignee = assignee;
+        order.Status = status;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(assignee);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        await assigneeSelect.SelectOptionAsync(assignee.UserName);
+        await statusSelect.SelectOptionAsync(status.Key);
+
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "AfterSearch");
+
+        // Assert
+        await Expect(creatorSelect).ToHaveValueAsync(creator.UserName);
+        await Expect(assigneeSelect).ToHaveValueAsync(assignee.UserName);
+        await Expect(statusSelect).ToHaveValueAsync(status.Key);
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldClearAllFilters_WhenClearFiltersButtonClicked()
+    {
+        // Arrange
+        var creator = CurrentUser;
+        var order = Faker<WorkOrder>();
+        order.Creator = creator;
+        order.Title = $"[{TestTag}] clear filters test";
+
+        await using var context = TestHost.NewDbContext();
+        context.Attach(creator);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+        var clearButton = Page.Locator($"#{WorkOrderSearch.Elements.ClearFiltersButton}");
+
+        // Set a filter
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        await TakeScreenshotAsync(1, "FilterSet");
+
+        // Assert button is enabled
+        await Expect(clearButton).ToBeEnabledAsync();
+
+        // Click clear
+        await clearButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "FiltersCleared");
+
+        // Assert all selects reset
+        await Expect(creatorSelect).ToHaveValueAsync("");
+        await Expect(assigneeSelect).ToHaveValueAsync("");
+        await Expect(statusSelect).ToHaveValueAsync("");
+
+        // Assert results table still visible
+        await Expect(Page.Locator(".grid-data")).ToBeVisibleAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task ClearFiltersButton_ShouldBeDisabled_WhenNoFiltersAreActive()
+    {
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "PageLoaded");
+
+        // Assert
+        var clearButton = Page.Locator($"#{WorkOrderSearch.Elements.ClearFiltersButton}");
+        await Expect(clearButton).ToBeDisabledAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldReloadParamsFromQueryStringWithNavigation()
+    {
+        // Arrange
+        var order1 = Faker<WorkOrder>();
+        order1.Status = WorkOrderStatus.InProgress;
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = CurrentUser;
+        order1.Assignee = CurrentUser;
+        order2.Creator = CurrentUser;
+        order2.Assignee = CurrentUser;
+
+        await using var context = TestHost.NewDbContext();
+        context.Attach(CurrentUser);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        // Assert
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        var statusSelect = Page.Locator($"#{WorkOrderSearch.Elements.StatusSelect}");
+
+        await Expect(creatorSelect).ToHaveValueAsync("");
+        await Expect(assigneeSelect).ToHaveValueAsync("");
+        await Expect(statusSelect).ToHaveValueAsync("");
+
+        await Click(nameof(NavMenu.Elements.MyWorkOrders));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await Expect(creatorSelect).ToHaveValueAsync(CurrentUser.UserName, new() { Timeout = 30_000 });
+
+        await Click(nameof(NavMenu.Elements.WorkOrdersAssignedToMe));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await Expect(assigneeSelect).ToHaveValueAsync(CurrentUser.UserName, new() { Timeout = 30_000 });
+
+        await Click(nameof(NavMenu.Elements.AllWorkOrdersInProgress));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await Expect(statusSelect).ToHaveValueAsync(order1.Status.Key, new() { Timeout = 30_000 });
+    }
+    [Test, Retry(2)]
+    public async Task SortByStatusHeader_SortsResultsAscending_ThenDescendingOnSecondClick()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var order1 = Faker<WorkOrder>();
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = creator;
+        order2.Creator = creator;
+        order1.Status = WorkOrderStatus.InProgress;
+        order2.Status = WorkOrderStatus.Assigned;
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "Loaded");
+
+        // Filter by creator so only these two work orders are in the result set
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "Filtered");
+
+        var statusSortBtn = Page.Locator($"#{WorkOrderSearch.Elements.SortByStatusButton}");
+        await statusSortBtn.ClickAsync();
+        await TakeScreenshotAsync(3, "SortedAscending");
+
+        await Expect(statusSortBtn).ToHaveTextAsync("Status ▲");
+        var firstCell = Page.Locator(".grid-data tbody tr").First.Locator("td:nth-child(4)");
+        await Expect(firstCell).ToContainTextAsync(WorkOrderStatus.Assigned.FriendlyName);
+
+        await statusSortBtn.ClickAsync();
+        await TakeScreenshotAsync(4, "SortedDescending");
+
+        await Expect(statusSortBtn).ToHaveTextAsync("Status ▼");
+        await Expect(firstCell).ToContainTextAsync(WorkOrderStatus.InProgress.FriendlyName);
+    }
+
+    [Test, Retry(2)]
+    public async Task SortByTitleHeader_SortsResultsAscending_ThenDescendingOnSecondClick()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var order1 = Faker<WorkOrder>();
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = creator;
+        order2.Creator = creator;
+        order1.Title = "Alpha";
+        order2.Title = "Zebra";
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var titleSortBtn = Page.Locator($"#{WorkOrderSearch.Elements.SortByTitleButton}");
+        await titleSortBtn.ClickAsync();
+        await TakeScreenshotAsync(1, "SortedAscending");
+
+        await Expect(titleSortBtn).ToHaveTextAsync("Title ▲");
+        var firstTitleCell = Page.Locator(".grid-data tbody tr").First.Locator("td:nth-child(5)");
+        await Expect(firstTitleCell).ToContainTextAsync("Alpha");
+
+        await titleSortBtn.ClickAsync();
+        await TakeScreenshotAsync(2, "SortedDescending");
+
+        await Expect(titleSortBtn).ToHaveTextAsync("Title ▼");
+        await Expect(firstTitleCell).ToContainTextAsync("Zebra");
+    }
+
+    [Test, Retry(2)]
+    public async Task SortByRoomHeader_SortsResultsAscending_ThenDescendingOnSecondClick()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var order1 = Faker<WorkOrder>();
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = creator;
+        order2.Creator = creator;
+        order1.RoomNumber = "Atrium";
+        order2.RoomNumber = "Zeppelin";
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var roomSortBtn = Page.Locator($"#{WorkOrderSearch.Elements.SortByRoomButton}");
+        await roomSortBtn.ClickAsync();
+        await TakeScreenshotAsync(1, "SortedAscending");
+
+        await Expect(roomSortBtn).ToHaveTextAsync("Room ▲");
+        var firstRoomCell = Page.Locator(".grid-data tbody tr").First.Locator("td:nth-child(7)");
+        await Expect(firstRoomCell).ToContainTextAsync("Atrium");
+
+        await roomSortBtn.ClickAsync();
+        await TakeScreenshotAsync(2, "SortedDescending");
+
+        await Expect(roomSortBtn).ToHaveTextAsync("Room ▼");
+        await Expect(firstRoomCell).ToContainTextAsync("Zeppelin");
+    }
+
+    [Test, Retry(2)]
+    public async Task AssignedToMe_WhenChecked_ShowsOnlyCurrentUsersWorkOrders()
+    {
+        // Arrange: create two employees each with a distinct assigned work order
+        var otherEmployee = Faker<Employee>();
+        var myOrder = Faker<WorkOrder>();
+        var otherOrder = Faker<WorkOrder>();
+        myOrder.Creator = CurrentUser;
+        myOrder.Assignee = CurrentUser;
+        myOrder.Title = $"[{TestTag}] my order";
+        otherOrder.Creator = otherEmployee;
+        otherOrder.Assignee = otherEmployee;
+        otherOrder.Title = $"[{TestTag}] other order";
+
+        await using var context = TestHost.NewDbContext();
+        context.Attach(CurrentUser);
+        context.Add(otherEmployee);
+        context.Add(myOrder);
+        context.Add(otherOrder);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "BeforeToggle");
+
+        var checkbox = Page.Locator($"#{WorkOrderSearch.Elements.AssignedToMeCheckbox}");
+        await checkbox.CheckAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "AfterToggle");
+
+        // Assert: only my order appears
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable).ToBeVisibleAsync();
+        await Expect(workOrderTable.Locator("tbody tr").Filter(new() { HasText = myOrder.Title })).ToHaveCountAsync(1);
+        await Expect(workOrderTable.Locator("tbody tr").Filter(new() { HasText = otherOrder.Title })).ToHaveCountAsync(0);
+
+        // Assert: Assignee dropdown is disabled
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        await Expect(assigneeSelect).ToBeDisabledAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task AssignedToMe_WhenUnchecked_RestoresFullList()
+    {
+        // Arrange
+        var otherEmployee = Faker<Employee>();
+        var myOrder = Faker<WorkOrder>();
+        var otherOrder = Faker<WorkOrder>();
+        myOrder.Creator = CurrentUser;
+        myOrder.Assignee = CurrentUser;
+        myOrder.Title = $"[{TestTag}] my order";
+        otherOrder.Creator = otherEmployee;
+        otherOrder.Assignee = otherEmployee;
+        otherOrder.Title = $"[{TestTag}] other order";
+
+        await using var context = TestHost.NewDbContext();
+        context.Attach(CurrentUser);
+        context.Add(otherEmployee);
+        context.Add(myOrder);
+        context.Add(otherOrder);
+        await context.SaveChangesAsync();
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var checkbox = Page.Locator($"#{WorkOrderSearch.Elements.AssignedToMeCheckbox}");
+        await checkbox.CheckAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "ToggleOn");
+
+        // Uncheck
+        await checkbox.UncheckAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "ToggleOff");
+
+        // Assert both orders reappear
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable.Locator("tbody tr").Filter(new() { HasText = myOrder.Title })).ToHaveCountAsync(1);
+        await Expect(workOrderTable.Locator("tbody tr").Filter(new() { HasText = otherOrder.Title })).ToHaveCountAsync(1);
+
+        // Assert Assignee dropdown is re-enabled
+        var assigneeSelect = Page.Locator($"#{WorkOrderSearch.Elements.AssigneeSelect}");
+        await Expect(assigneeSelect).ToBeEnabledAsync();
+    }
+
+    [Test, Retry(2)]
+    public async Task AssignedToMe_ToggleStatePersistedWithinSession()
+    {
+        // Arrange: seed a work order assigned to current user
+        var myOrder = Faker<WorkOrder>();
+        myOrder.Creator = CurrentUser;
+        myOrder.Assignee = CurrentUser;
+        myOrder.Title = $"[{TestTag}] persisted order";
+
+        await using var context = TestHost.NewDbContext();
+        context.Attach(CurrentUser);
+        context.Add(myOrder);
+        await context.SaveChangesAsync();
+
+        // Navigate to search and check the toggle
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var checkbox = Page.Locator($"#{WorkOrderSearch.Elements.AssignedToMeCheckbox}");
+        await checkbox.CheckAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "ToggleChecked");
+
+        // Navigate away to a work order detail and back
+        var workOrderLink = Page.Locator(".grid-data tbody tr").First.Locator("td").First.Locator("a");
+        await workOrderLink.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "WorkOrderDetail");
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(3, "BackOnSearch");
+
+        // Assert: checkbox is still checked (state persisted via WorkOrderSearchState)
+        var checkboxAfterNav = Page.Locator($"#{WorkOrderSearch.Elements.AssignedToMeCheckbox}");
+        await Expect(checkboxAfterNav).ToBeCheckedAsync();
+
+        // Assert: results still scoped to current user
+        var workOrderTable = Page.Locator(".grid-data");
+        await Expect(workOrderTable.Locator("tbody tr").Filter(new() { HasText = myOrder.Title })).ToHaveCountAsync(1);
+    }
+
+    [Test, Retry(2)]
+    public async Task SortByDueDateHeader_SortsResultsAscending_ThenDescendingOnSecondClick()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var order1 = Faker<WorkOrder>();
+        var order2 = Faker<WorkOrder>();
+        order1.Creator = creator;
+        order2.Creator = creator;
+        order1.DueDate = new DateOnly(2099, 1, 1);
+        order2.DueDate = new DateOnly(2099, 12, 31);
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(order1);
+        context.Add(order2);
+        await context.SaveChangesAsync();
+
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "Loaded");
+
+        // Filter by creator so only these two work orders are in the result set
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "Filtered");
+
+        var dueDateSortBtn = Page.Locator($"#{WorkOrderSearch.Elements.SortByDueDateButton}");
+        await dueDateSortBtn.ClickAsync();
+        await TakeScreenshotAsync(3, "SortedAscending");
+
+        await Expect(dueDateSortBtn).ToHaveTextAsync("Due Date ▲");
+        var firstRow = Page.Locator(".grid-data tbody tr").First;
+        await Expect(firstRow.Locator("td:nth-child(6)")).ToContainTextAsync("Jan");
+
+        await dueDateSortBtn.ClickAsync();
+        await TakeScreenshotAsync(4, "SortedDescending");
+
+        await Expect(dueDateSortBtn).ToHaveTextAsync("Due Date ▼");
+        await Expect(firstRow.Locator("td:nth-child(6)")).ToContainTextAsync("Dec");
+    }
+
+    [Test, Retry(2)]
+    public async Task Should_ShowOverdueOnly_WhenToggleIsChecked()
+    {
+        // Arrange
+        var creator = Faker<Employee>();
+        var overdueOrder = Faker<WorkOrder>();
+        overdueOrder.Creator = creator;
+        overdueOrder.Status = WorkOrderStatus.InProgress;
+        overdueOrder.DueDate = new DateOnly(2000, 1, 1);
+
+        var futureOrder = Faker<WorkOrder>();
+        futureOrder.Creator = creator;
+        futureOrder.Status = WorkOrderStatus.InProgress;
+        futureOrder.DueDate = new DateOnly(2099, 12, 31);
+
+        await using var context = TestHost.NewDbContext();
+        context.Add(creator);
+        context.Add(overdueOrder);
+        context.Add(futureOrder);
+        await context.SaveChangesAsync();
+
+        // Act
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        // Filter to this creator so only our two orders appear
+        var creatorSelect = Page.Locator($"#{WorkOrderSearch.Elements.CreatorSelect}");
+        await creatorSelect.SelectOptionAsync(creator.UserName);
+        var searchButton = Page.Locator($"#{WorkOrderSearch.Elements.SearchButton}");
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(1, "BothOrders");
+
+        // Check both rows visible
+        var tableRows = Page.Locator(".grid-data tbody tr");
+        await Expect(tableRows).ToHaveCountAsync(2);
+
+        // Toggle "Show overdue only"
+        var toggle = Page.Locator($"#{WorkOrderSearch.Elements.OverdueOnlyToggle}");
+        await toggle.CheckAsync();
+        await searchButton.ClickAsync();
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TakeScreenshotAsync(2, "OverdueOnly");
+
+        // Assert only the overdue row is visible
+        await Expect(tableRows).ToHaveCountAsync(1);
+        var onlyRow = tableRows.First;
+        await Expect(onlyRow).ToHaveClassAsync(new Regex("overdue-row"));
+    }
+}

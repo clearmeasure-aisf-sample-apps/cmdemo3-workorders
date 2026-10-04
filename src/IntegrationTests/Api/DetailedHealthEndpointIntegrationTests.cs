@@ -1,0 +1,438 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using ClearMeasure.Bootcamp.UI.Api;
+using Microsoft.Extensions.DependencyInjection;
+using Shouldly;
+
+namespace ClearMeasure.Bootcamp.IntegrationTests.Api;
+
+[TestFixture]
+public class DetailedHealthEndpointIntegrationTests
+{
+    private DetailedHealthWebApplicationFactory? _factory;
+    private HttpClient? _client;
+
+    [OneTimeSetUp]
+    public void OneTimeSetUp()
+    {
+        _factory = new DetailedHealthWebApplicationFactory();
+        _client = _factory.CreateClient();
+    }
+
+    [OneTimeTearDown]
+    public void OneTimeTearDown()
+    {
+        _client?.Dispose();
+        _factory?.Dispose();
+    }
+
+    [Test]
+    public async Task Should_Return200AndJson_When_GetSimpleHealth()
+    {
+        var response = await _client!.GetAsync("/api/health");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        mediaType.ShouldNotBeNull();
+        mediaType.ShouldContain("application/json");
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("status", out var status).ShouldBeTrue();
+        status.GetString().ShouldBe(SimpleHealthStatus.Healthy);
+        doc.RootElement.TryGetProperty("currentTimeUtc", out _).ShouldBeTrue();
+        doc.RootElement.TryGetProperty("uptime", out _).ShouldBeTrue();
+    }
+
+    [Test]
+    public async Task Should_AllowAnonymousAccess_When_GetSimpleHealth()
+    {
+        using var anonymous = _factory!.CreateClient();
+        var response = await anonymous.GetAsync("/api/health");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Test]
+    public async Task Should_ReturnRecentUtcAndNonNegativeUptime_When_GetSimpleHealth()
+    {
+        var response = await _client!.GetAsync("/api/health");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var payload = await response.Content.ReadFromJsonAsync<SimpleHealthResponse>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        payload.ShouldNotBeNull();
+        payload.CurrentTimeUtc.Kind.ShouldBe(DateTimeKind.Utc);
+        (DateTime.UtcNow - payload.CurrentTimeUtc).Duration().ShouldBeLessThan(TimeSpan.FromMinutes(5));
+        payload.Uptime.ShouldBeGreaterThanOrEqualTo(TimeSpan.Zero);
+    }
+
+    [Test]
+    public async Task Should_Return200AndJson_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        mediaType.ShouldNotBeNull();
+        mediaType.ShouldContain("application/json");
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("overallStatus", out _).ShouldBeTrue();
+        doc.RootElement.TryGetProperty("checkedAtUtc", out _).ShouldBeTrue();
+        doc.RootElement.TryGetProperty("components", out var components).ShouldBeTrue();
+        components.ValueKind.ShouldBe(JsonValueKind.Array);
+        components.GetArrayLength().ShouldBeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task Should_ExposeOverallStatus_WorstCase_When_ComponentsMixed()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.OverallStatus.ShouldBe(HealthReportBuilder.AggregateWorst(report.Components));
+    }
+
+    [Test]
+    public async Task Should_IncludeCheckedAtUtc_ParseableUtc_When_ResponseReturned()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.CheckedAtUtc.Kind.ShouldBe(DateTimeKind.Utc);
+        (DateTime.UtcNow - report.CheckedAtUtc).Duration().ShouldBeLessThan(TimeSpan.FromMinutes(5));
+    }
+
+    [Test]
+    public async Task Should_AllowAnonymousAccess_When_NoAuthHeaders()
+    {
+        using var anonymous = _factory!.CreateClient();
+        var response = await anonymous.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Test]
+    public async Task Should_IncludeProcessId_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("processId", out var processId).ShouldBeTrue();
+        processId.GetInt32().ShouldBeGreaterThan(0);
+        processId.GetInt32().ShouldBe(Environment.ProcessId);
+    }
+
+    [Test]
+    public async Task Should_DeserializeProcessId_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.ProcessId.ShouldBeGreaterThan(0);
+        report.ProcessId.ShouldBe(Environment.ProcessId);
+    }
+
+    [Test]
+    public async Task Should_IncludeOsDescription_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("osDescription", out var osDescription).ShouldBeTrue();
+        var value = osDescription.GetString();
+        value.ShouldNotBeNull();
+        value.ShouldNotBeEmpty();
+    }
+
+    [Test]
+    public async Task Should_DeserializeOsDescription_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.OsDescription.ShouldNotBeNull();
+        report.OsDescription.ShouldNotBeEmpty();
+    }
+
+    [Test]
+    public async Task Should_IncludeFrameworkDescription_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("frameworkDescription", out var frameworkDescription).ShouldBeTrue();
+        var value = frameworkDescription.GetString();
+        value.ShouldNotBeNull();
+        value.ShouldNotBeEmpty();
+    }
+
+    [Test]
+    public async Task Should_DeserializeFrameworkDescription_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.FrameworkDescription.ShouldNotBeNull();
+        report.FrameworkDescription.ShouldNotBeEmpty();
+    }
+
+    [Test]
+    public async Task Should_IncludeGcMemoryMb_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("gcMemoryMb", out var gcMemoryMb).ShouldBeTrue();
+        gcMemoryMb.ValueKind.ShouldBe(JsonValueKind.Number);
+        gcMemoryMb.GetInt32().ShouldBeGreaterThanOrEqualTo(0);
+    }
+
+    [Test]
+    public async Task Should_DeserializeGcMemoryMb_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.GcMemoryMb.ShouldBeGreaterThanOrEqualTo(0);
+    }
+
+    [Test]
+    public async Task Should_IncludeWorkingSetMb_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("workingSetMb", out var workingSetMb).ShouldBeTrue();
+        workingSetMb.ValueKind.ShouldBe(JsonValueKind.Number);
+        workingSetMb.GetInt32().ShouldBeGreaterThanOrEqualTo(0);
+    }
+
+    [Test]
+    public async Task Should_DeserializeWorkingSetMb_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.WorkingSetMb.ShouldBeGreaterThanOrEqualTo(0);
+    }
+
+    [Test]
+    public async Task Should_IncludeProcessorCount_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("processorCount", out var processorCount).ShouldBeTrue();
+        processorCount.ValueKind.ShouldBe(JsonValueKind.Number);
+        processorCount.GetInt32().ShouldBeGreaterThanOrEqualTo(1);
+        processorCount.GetInt32().ShouldBe(Environment.ProcessorCount);
+    }
+
+    [Test]
+    public async Task Should_DeserializeProcessorCount_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.ProcessorCount.ShouldBeGreaterThanOrEqualTo(1);
+        report.ProcessorCount.ShouldBe(Environment.ProcessorCount);
+    }
+
+    [Test]
+    public async Task Should_IncludeIs64BitProcess_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("is64BitProcess", out var is64BitProcess).ShouldBeTrue();
+        is64BitProcess.GetBoolean().ShouldBe(Environment.Is64BitProcess);
+    }
+
+    [Test]
+    public async Task Should_DeserializeIs64BitProcess_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.Is64BitProcess.ShouldBe(Environment.Is64BitProcess);
+    }
+
+    [Test]
+    public async Task GetApiHealthDetailedReturnsTimeZoneId()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("timeZoneId", out var timeZoneId).ShouldBeTrue();
+        timeZoneId.GetString().ShouldBe(TimeZoneInfo.Local.Id);
+    }
+
+    [Test]
+    public async Task Should_IncludeProcessPriority_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        doc.RootElement.TryGetProperty("processPriority", out var processPriority).ShouldBeTrue();
+        processPriority.ValueKind.ShouldBe(JsonValueKind.String);
+        var value = processPriority.GetString();
+        value.ShouldNotBeNull();
+        value.ShouldNotBeEmpty();
+        value.ShouldBe(Process.GetCurrentProcess().PriorityClass.ToString());
+    }
+
+    [Test]
+    public async Task Should_DeserializeProcessPriority_ToDetailedHealthReport_When_GetDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.ProcessPriority.ShouldNotBeNull();
+        report.ProcessPriority.ShouldNotBeEmpty();
+        report.ProcessPriority.ShouldBe(Process.GetCurrentProcess().PriorityClass.ToString());
+    }
+
+    [Test]
+    public async Task Should_ListExpectedComponentEntries_When_AggregatedFromRegisteredChecks()
+    {
+        var response = await _client!.GetAsync("/api/health/detailed");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        var names = report.Components.Select(c => c.Name).ToHashSet();
+        names.ShouldContain("LlmGateway");
+        names.ShouldContain("DataAccess");
+        names.ShouldContain("Server");
+        names.ShouldContain("API");
+        names.ShouldContain("Jeffrey");
+        foreach (var c in report.Components)
+        {
+            (c.Status == ComponentHealthStatus.Healthy
+                || c.Status == ComponentHealthStatus.Degraded
+                || c.Status == ComponentHealthStatus.Unhealthy).ShouldBeTrue();
+        }
+    }
+
+    [Test]
+    public async Task Should_Return200AndJson_When_GetVersionedDetailedHealth()
+    {
+        var response = await _client!.GetAsync("/api/v1.0/health/detailed");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        mediaType.ShouldNotBeNull();
+        mediaType.ShouldContain("application/json");
+
+        var report = await response.Content.ReadFromJsonAsync<DetailedHealthReport>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        report.ShouldNotBeNull();
+        report.OverallStatus.ShouldNotBeNullOrWhiteSpace();
+        report.Components.Count.ShouldBeGreaterThan(0);
+        foreach (var c in report.Components)
+        {
+            c.Name.ShouldNotBeNullOrWhiteSpace();
+            c.Status.ShouldNotBeNullOrWhiteSpace();
+        }
+    }
+
+    [Test]
+    public async Task Should_SupportConditionalGet_When_ETagMatches()
+    {
+        // Use a dedicated factory with a fixed-report stub so the ETag hash is
+        // identical on both requests regardless of host-metric drift or test order.
+        var fixedReport = new DetailedHealthReport
+        {
+            OverallStatus = ComponentHealthStatus.Healthy,
+            CheckedAtUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            ProcessId = 1,
+            OsDescription = "Test OS",
+            FrameworkDescription = "Test Framework",
+            GcMemoryMb = 100,
+            WorkingSetMb = 200,
+            ProcessorCount = 4,
+            Is64BitProcess = true,
+            TimeZoneId = "UTC",
+            ProcessPriority = "Normal",
+            Components =
+            [
+                new ComponentHealthEntry { Name = "API", Status = ComponentHealthStatus.Healthy }
+            ]
+        };
+
+        await using var isolatedFactory = _factory!.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+                services.AddSingleton<IDetailedHealthReportProvider>(
+                    new FixedDetailedHealthReportProvider(fixedReport))));
+
+        using var isolatedClient = isolatedFactory.CreateClient();
+
+        var first = await isolatedClient.GetAsync("/api/health/detailed");
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var etag = first.Headers.ETag.ShouldNotBeNull();
+
+        using var second = new HttpRequestMessage(HttpMethod.Get, "/api/health/detailed");
+        second.Headers.IfNoneMatch.Add(etag);
+        var notModified = await isolatedClient.SendAsync(second);
+        notModified.StatusCode.ShouldBe(HttpStatusCode.NotModified);
+        (await notModified.Content.ReadAsByteArrayAsync()).Length.ShouldBe(0);
+    }
+
+    private sealed class FixedDetailedHealthReportProvider(DetailedHealthReport report) : IDetailedHealthReportProvider
+    {
+        public Task<DetailedHealthReport> GetReportAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(report);
+    }
+}

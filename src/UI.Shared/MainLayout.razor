@@ -1,0 +1,127 @@
+@inherits Palermo.BlazorMvc.MvcLayoutComponentBase
+
+<div class="@AppContainerClass">
+    <aside id="app-navigation-rail" class="@SidebarClass">
+        <div class="sidebar-header">
+            <div class="church-brand">
+                <div class="church-icon">
+                    <i class="bi bi-building" aria-hidden="true"></i>
+                </div>
+                <div class="brand-text">
+                    <h4>First Church</h4>
+                    <span>Springfield</span>
+                </div>
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <NavMenu/>
+        </nav>
+        <div class="sidebar-footer">
+            <HealthCheckLink/>
+        </div>
+    </aside>
+
+    @if (_isNarrowViewport && _navVisible)
+    {
+        <div class="nav-backdrop" @onclick="ToggleNavRailAsync"></div>
+    }
+
+    <div class="main-container">
+        <header class="modern-header">
+            <div class="header-content">
+                <div class="header-leading">
+                    <button type="button"
+                            class="nav-rail-toggle"
+                            data-testid="@nameof(Elements.NavRailToggle)"
+                            @ref="_navToggleButtonRef"
+                            @onclick="ToggleNavRailAsync"
+                            aria-controls="app-navigation-rail"
+                            aria-expanded="@NavToggleAriaExpanded"
+                            title="@NavToggleTitle"
+                            aria-label="@NavToggleTitle">
+                        @if (_navVisible)
+                        {
+                            <i class="bi bi-chevron-double-left" aria-hidden="true"></i>
+                        }
+                        else
+                        {
+                            <i class="bi bi-list" aria-hidden="true"></i>
+                        }
+                    </button>
+                    <div class="header-title">
+                        <h3>Work Order Management</h3>
+                        <span class="subtitle">Church Bulletin</span>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button type="button"
+                            class="dark-mode-toggle"
+                            data-testid="@nameof(Elements.DarkModeToggle)"
+                            @onclick="ToggleDarkModeAsync"
+                            title="@DarkModeToggleTitle"
+                            aria-label="@DarkModeToggleTitle">
+                        @if (Theme.IsDarkMode)
+                        {
+                            <i class="bi bi-moon" aria-hidden="true"></i>
+                        }
+                        else
+                        {
+                            <i class="bi bi-sun" aria-hidden="true"></i>
+                        }
+                    </button>
+                    <AuthorizeView>
+                        <Authorized>
+                            <div class="user-section">
+                                <Logout/>
+                            </div>
+                        </Authorized>
+                        <NotAuthorized>
+                            <div class="auth-section">
+                                <LoginLink/>
+                            </div>
+                        </NotAuthorized>
+                    </AuthorizeView>
+                </div>
+            </div>
+        </header>
+
+        <main class="modern-main">
+            <div class="content-wrapper">
+                @Body
+            </div>
+        </main>
+
+        <footer class="site-footer" data-testid="@nameof(Elements.CopyrightFooter)">
+            <div class="site-footer-inner">
+                <span class="site-footer-line">
+                    © @CopyrightYear
+                    <a class="site-footer-link"
+                       href="https://clearmeasure.com/"
+                       target="_blank"
+                       rel="noopener noreferrer">ClearMeasure Labs</a>
+                </span>
+                <span class="site-footer-note" data-testid="@nameof(Elements.FooterNote)">
+                    Submit a new work order any time — requests are typically reviewed within one business day. Thank you for serving!
+                </span>
+                <span class="site-footer-note" data-testid="@nameof(Elements.SoftwareVersion)">
+                    @AppVersion
+                    @if (_gitSha != "unknown" && _gitSha.Length >= 7)
+                    {
+                        <span> · </span>
+                        <a data-testid="@nameof(Elements.GitSha)"
+                           href="https://github.com/ClearMeasureLabs/bootcamp-palermo-workorders/commit/@_gitSha"
+                           target="_blank"
+                           rel="noopener noreferrer">@_gitSha[..7]</a>
+                    }
+                    else
+                    {
+                        <span> · </span>
+                        <span data-testid="@nameof(Elements.GitSha)">unknown</span>
+                    }
+                    <span> · </span>
+                    <span data-testid="@nameof(Elements.EnvironmentName)">@_environmentName</span>
+                </span>
+            </div>
+        </footer>
+    </div>
+</div>

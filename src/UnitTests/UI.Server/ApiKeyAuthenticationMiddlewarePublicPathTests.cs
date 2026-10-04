@@ -1,0 +1,91 @@
+using ClearMeasure.Bootcamp.UI.Server;
+using Microsoft.AspNetCore.Http;
+using Shouldly;
+
+namespace ClearMeasure.Bootcamp.UnitTests.UI.Server;
+
+[TestFixture]
+public class ApiKeyAuthenticationMiddlewarePublicPathTests
+{
+    [TestCase("/api/version", true)]
+    [TestCase("/api/v1.0/version", true)]
+    [TestCase("/api/time", true)]
+    [TestCase("/api/v1.0/ping", true)]
+    [TestCase("/api/tools/random", true)]
+    [TestCase("/api/v1.0/tools/random", true)]
+    [TestCase("/api/tools/hash", true)]
+    [TestCase("/api/v1.0/tools/hash", true)]
+    [TestCase("/api/tools/timestamp-converter", true)]
+    [TestCase("/api/v1.0/tools/timestamp-converter", true)]
+    [TestCase("/api/tools/guid-generator", true)]
+    [TestCase("/api/v1.0/tools/guid-generator", true)]
+    [TestCase("/api/health", true)]
+    [TestCase("/api/health/detailed", true)]
+    [TestCase("/api/v1.0/health", true)]
+    [TestCase("/api/v1.0/health/detailed", true)]
+    [TestCase("/api/status/environment", false)]
+    [TestCase("/api/v1.0/status/environment", false)]
+    [TestCase("/api/workorders", false)]
+    [TestCase("/mcp", false)]
+    public void IsPublicVersionOrTimePath_ReturnsExpected(string path, bool expectedPublic)
+    {
+        ApiKeyAuthenticationMiddleware.IsPublicVersionOrTimePath(path).ShouldBe(expectedPublic);
+    }
+
+    [TestCase("/api/version", "version")]
+    [TestCase("/api/v1.0/time", "time")]
+    [TestCase("/api/tools/random", "tools/random")]
+    [TestCase("/api/v1.0/tools/random", "tools/random")]
+    [TestCase("/api/tools/hash", "tools/hash")]
+    [TestCase("/api/v1.0/tools/hash", "tools/hash")]
+    [TestCase("/api/tools/timestamp-converter", "tools/timestamp-converter")]
+    [TestCase("/api/v1.0/tools/timestamp-converter", "tools/timestamp-converter")]
+    [TestCase("/api/tools/guid-generator", "tools/guid-generator")]
+    [TestCase("/api/v1.0/tools/guid-generator", "tools/guid-generator")]
+    [TestCase("/api/health", "health")]
+    [TestCase("/api/health/detailed", "health/detailed")]
+    [TestCase("/api/v1.0/health/detailed", "health/detailed")]
+    public void TryGetLeafSegment_ReturnsLeaf(string path, string expectedLeaf)
+    {
+        ApiPublicPathRules.TryGetLeafSegment(path, out var leaf).ShouldBeTrue();
+        leaf.ShouldBe(expectedLeaf);
+    }
+
+    [Test]
+    public void ApiPublicPathRules_Should_TreatDetailedHealthAsPublic()
+    {
+        string[] publicHealthPaths =
+        [
+            "/api/health",
+            "/api/health/detailed",
+            "/api/v1.0/health",
+            "/api/v1.0/health/detailed"
+        ];
+
+        foreach (var path in publicHealthPaths)
+        {
+            ApiPublicPathRules.TryGetLeafSegment(path, out var leaf).ShouldBeTrue(path);
+            ApiPublicPathRules.IsPublicLeaf(leaf).ShouldBeTrue(path);
+            ApiKeyAuthenticationMiddleware.IsPublicVersionOrTimePath(path).ShouldBeTrue(path);
+            ApiKeyAuthenticationMiddleware.ShouldValidate(
+                path,
+                new ApiKeyAuthenticationOptions { Enabled = true, ValidationKey = "secret" })
+                .ShouldBeFalse(path);
+        }
+    }
+
+    [Test]
+    public void IsAuthorized_ReturnsTrue_WhenKeyMatches()
+    {
+        var request = new DefaultHttpContext().Request;
+        request.Headers["X-API-Key"] = "secret";
+        ApiKeyAuthenticationMiddleware.IsAuthorized(request, "secret").ShouldBeTrue();
+    }
+
+    [Test]
+    public void IsAuthorized_ReturnsFalse_WhenKeyMissing()
+    {
+        var request = new DefaultHttpContext().Request;
+        ApiKeyAuthenticationMiddleware.IsAuthorized(request, "secret").ShouldBeFalse();
+    }
+}

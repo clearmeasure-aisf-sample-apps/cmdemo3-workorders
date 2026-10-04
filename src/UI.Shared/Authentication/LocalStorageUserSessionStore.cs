@@ -1,0 +1,65 @@
+using Microsoft.JSInterop;
+
+namespace ClearMeasure.Bootcamp.UI.Shared.Authentication;
+
+/// <summary>
+/// WASM <see cref="IUserSessionStore"/> that reads and writes browser localStorage via <see cref="IJSRuntime"/>.
+/// </summary>
+public sealed class LocalStorageUserSessionStore : IUserSessionStore
+{
+    private const string StorageKey = "bootcamp.userSession.username";
+    private readonly IJSRuntime _js;
+
+    /// <summary>
+    /// Creates a store backed by browser localStorage.
+    /// </summary>
+    /// <param name="js">JavaScript runtime used to access localStorage.</param>
+    public LocalStorageUserSessionStore(IJSRuntime js) => _js = js;
+
+    /// <inheritdoc />
+    public async Task<string?> GetAsync()
+    {
+        try
+        {
+            return await _js.InvokeAsync<string?>("localStorage.getItem", StorageKey);
+        }
+        catch (JSException)
+        {
+            return null;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SetAsync(string username)
+    {
+        try
+        {
+            await _js.InvokeVoidAsync("localStorage.setItem", StorageKey, username);
+        }
+        catch (JSException exception)
+        {
+            throw new InvalidOperationException(
+                $"Failed to persist user session to '{StorageKey}'.", exception);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task ClearAsync()
+    {
+        try
+        {
+            await _js.InvokeVoidAsync("localStorage.removeItem", StorageKey);
+            var remaining = await _js.InvokeAsync<string?>("localStorage.getItem", StorageKey);
+            if (!string.IsNullOrEmpty(remaining))
+            {
+                throw new InvalidOperationException(
+                    $"Failed to clear user session; '{StorageKey}' still contains a value.");
+            }
+        }
+        catch (JSException exception)
+        {
+            throw new InvalidOperationException(
+                $"Failed to clear user session from '{StorageKey}'.", exception);
+        }
+    }
+}

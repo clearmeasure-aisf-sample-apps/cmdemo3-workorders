@@ -1,0 +1,148 @@
+using ClearMeasure.Bootcamp.Core;
+using ClearMeasure.Bootcamp.Core.Model;
+using ClearMeasure.Bootcamp.Core.Queries;
+using ClearMeasure.Bootcamp.DataAccess.Handlers;
+using ClearMeasure.Bootcamp.DataAccess.Mappings;
+using Microsoft.EntityFrameworkCore;
+using Shouldly;
+
+namespace ClearMeasure.Bootcamp.IntegrationTests.DataAccess;
+
+[TestFixture]
+public class EmployeeQueryHandlerTests
+{
+    [Test]
+    public async Task ShouldFindEmployeeByUsername()
+    {
+        new DatabaseTests().Clean();
+
+        var one = new Employee("1", "first1", "last1", "email1");
+        var two = new Employee("2", "first2", "last2", "email2");
+        var three = new Employee("3", "first3", "last3", "email3");
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(one);
+            context.Add(two);
+            context.Add(three);
+            await context.SaveChangesAsync();
+        }
+
+        var dataContext = TestHost.GetRequiredService<DataContext>();
+        var handler = new EmployeeQueryHandler(dataContext);
+        var employee = await handler.Handle(new EmployeeByUserNameQuery("1"));
+        Assert.That(employee.Id, Is.EqualTo(one.Id));
+    }
+
+    [Test]
+    public async Task ShouldGetAllEmployees()
+    {
+        new DatabaseTests().Clean();
+
+        var one = new Employee("1", "first1", "last1", "email1");
+        var two = new Employee("2", "first2", "last2", "email2");
+        var three = new Employee("3", "first3", "last3", "email3");
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(two);
+            context.Add(three);
+            context.Add(one);
+            await context.SaveChangesAsync();
+        }
+
+        var dataContext = TestHost.GetRequiredService<DataContext>();
+        var handler = new EmployeeQueryHandler(dataContext);
+        var employees = await handler.Handle(new EmployeeGetAllQuery());
+
+        Assert.That(employees.Length, Is.EqualTo(3));
+        Assert.That(employees[0].UserName, Is.EqualTo("1"));
+        Assert.That(employees[0].FirstName, Is.EqualTo("first1"));
+        Assert.That(employees[0].LastName, Is.EqualTo("last1"));
+        Assert.That(employees[0].EmailAddress, Is.EqualTo("email1"));
+    }
+
+    [Test]
+    public async Task ShouldPersistPreferredLanguage()
+    {
+        new DatabaseTests().Clean();
+
+        var employee = new Employee("testuser", "Test", "User", "test@test.com") { PreferredLanguage = "fr-FR" };
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(employee);
+            await context.SaveChangesAsync();
+        }
+
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            var rehydratedEmployee = context.Set<Employee>().First(e => e.Id == employee.Id);
+            rehydratedEmployee.PreferredLanguage.ShouldBe("fr-FR");
+        }
+    }
+
+    [Test]
+    public async Task ShouldPersistDefaultPreferredLanguage()
+    {
+        new DatabaseTests().Clean();
+
+        var employee = new Employee("testuser", "Test", "User", "test@test.com");
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(employee);
+            await context.SaveChangesAsync();
+        }
+
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            var rehydratedEmployee = context.Set<Employee>().First(e => e.Id == employee.Id);
+            rehydratedEmployee.PreferredLanguage.ShouldBe("en-US");
+        }
+    }
+
+    [Test]
+    public async Task Should_ReturnStoredEmployeeNames_Unchanged_When_EmployeeGetAllQueryHandled()
+    {
+        new DatabaseTests().Clean();
+
+        var one = new Employee("1", "first1", "last1", "email1");
+        var two = new Employee("2", "First2", "Last2", "email2");
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(one);
+            context.Add(two);
+            await context.SaveChangesAsync();
+        }
+
+        var dataContext = TestHost.GetRequiredService<DataContext>();
+        var handler = new EmployeeQueryHandler(dataContext);
+        var employees = await handler.Handle(new EmployeeGetAllQuery());
+
+        employees.Length.ShouldBe(2);
+        employees[0].FirstName.ShouldBe("first1");
+        employees[0].LastName.ShouldBe("last1");
+        employees[1].FirstName.ShouldBe("First2");
+        employees[1].LastName.ShouldBe("Last2");
+    }
+
+    [Test]
+    public async Task Should_NotMutateEmployeeRecords_When_LoginPageLoadsEmployees()
+    {
+        new DatabaseTests().Clean();
+
+        var homer = new Employee("hsimpson", "Homer", "Simpson", "homer@test.com");
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            context.Add(homer);
+            await context.SaveChangesAsync();
+        }
+
+        var bus = TestHost.GetRequiredService<IBus>();
+        _ = await bus.Send(new EmployeeGetAllQuery());
+
+        await using (var context = TestHost.GetRequiredService<DbContext>())
+        {
+            var rehydrated = context.Set<Employee>().Single(e => e.UserName == "hsimpson");
+            rehydrated.FirstName.ShouldBe("Homer");
+            rehydrated.LastName.ShouldBe("Simpson");
+        }
+    }
+}

@@ -1,0 +1,191 @@
+<div class="search-page">
+    <div class="search-container">
+        <div class="search-header">
+            <h2 title="Search all work orders" data-testid="@Elements.SearchHeadingTooltip">Work Order Search</h2>
+            <p data-testid="@Elements.SearchHint">Use the filters to narrow the list of work orders.</p>
+            <div class="search-subtitle">Find and manage church maintenance requests</div>
+        </div>
+
+        <div class="search-filters-card">
+            <EditForm Model="@Model" OnValidSubmit="OnSearch!">
+                <div class="filters-grid">
+                    <div class="filter-group">
+                        <label class="filter-label" for="@Elements.CreatorSelect">Creator</label>
+                        <InputSelect id="@Elements.CreatorSelect" @bind-Value="Model.Filters.Creator" class="form-control">
+                            <option value="">All</option>
+                            @foreach (var user in UserOptions)
+                            {
+                                <option value="@user.Value">@user.Text</option>
+                            }
+                        </InputSelect>
+                    </div>
+
+                    <div class="filter-group">
+                        <label class="filter-label" for="@Elements.AssigneeSelect">Assignee</label>
+                        <InputSelect id="@Elements.AssigneeSelect" @bind-Value="Model.Filters.Assignee" class="form-control" disabled="@_assignedToMe">
+                            <option value="">All</option>
+                            @foreach (var user in UserOptions)
+                            {
+                                <option value="@user.Value">@user.Text</option>
+                            }
+                        </InputSelect>
+                    </div>
+
+                    <div class="filter-group">
+                        <InputCheckbox id="@Elements.AssignedToMeCheckbox" @bind-Value="_assignedToMe" @bind-Value:after="HandleAssignedToMeChanged" />
+                        <label class="filter-label" for="@Elements.AssignedToMeCheckbox">Assigned to me</label>
+                    </div>
+
+                    <div class="filter-group">
+                        <label class="filter-label" for="@Elements.StatusSelect">Status</label>
+                        <InputSelect id="@Elements.StatusSelect" @bind-Value="Model.Filters.Status" class="form-control">
+                            <option value="">All</option>
+                            @foreach (var status in StatusOptions)
+                            {
+                                <option value="@status.Value">@status.Text</option>
+                            }
+                        </InputSelect>
+                    </div>
+
+                    <div class="filter-group">
+                        <label class="filter-label" for="@Elements.OverdueOnlyToggle">Overdue</label>
+                        <div class="overdue-toggle-wrapper">
+                            <InputCheckbox id="@Elements.OverdueOnlyToggle" @bind-Value="Model.Filters.OverdueOnly" />
+                            <label for="@Elements.OverdueOnlyToggle">Show overdue only</label>
+                        </div>
+                    </div>
+
+                    <div class="filter-group">
+                        <button id="@Elements.SearchButton" type="submit" class="btn btn-primary">
+                            <i class="bi bi-search" aria-hidden="true"></i> Search
+                        </button>
+                        <button id="@Elements.ClearFiltersButton" type="button" class="btn btn-secondary" disabled="@(!HasActiveFilters)" @onclick="HandleClearFilters">
+                            Clear filters
+                        </button>
+                    </div>
+                </div>
+            </EditForm>
+        </div>
+
+        <div class="results-card">
+            <div class="results-header">
+                <i class="bi bi-list-task" aria-hidden="true"></i> Search Results (@Model.Results.Length work orders)
+            </div>
+
+            @if (Model.Results.Length == 0)
+            {
+                <div class="empty-results">
+                    <div class="empty-results-icon">
+                        <i class="bi bi-inbox" aria-hidden="true"></i>
+                    </div>
+                    <p>No work orders found matching your search criteria.</p>
+                    <p>Try adjusting your filters or create a new work order.</p>
+                </div>
+            }
+            else
+            {
+                <table class="grid-data">
+                    <thead>
+                    <tr>
+                        <th>WO #</th>
+                           <th>Creator</th>
+                           <th>Assignee</th>
+                           <th>
+                               <button id="@Elements.SortByStatusButton" class="sort-btn @(_sortColumn == "Status" ? "sort-active" : "")" @onclick='() => SortBy("Status")'>
+                                   Status @if (_sortColumn == "Status") { <span>@(_sortAscending ? "▲" : "▼")</span> }
+                               </button>
+                           </th>
+                           <th>
+                               <button id="@Elements.SortByTitleButton" class="sort-btn @(_sortColumn == "Title" ? "sort-active" : "")" @onclick='() => SortBy("Title")'>
+                                   Title @if (_sortColumn == "Title") { <span>@(_sortAscending ? "▲" : "▼")</span> }
+                               </button>
+                           </th>
+                           <th>
+                               <button id="@Elements.SortByDueDateButton" class="sort-btn @(_sortColumn == "DueDate" ? "sort-active" : "")" @onclick='() => SortBy("DueDate")'>
+                                   Due Date @if (_sortColumn == "DueDate") { <span>@(_sortAscending ? "▲" : "▼")</span> }
+                               </button>
+                           </th>
+                           <th>
+                               <button id="@Elements.SortByRoomButton" class="sort-btn @(_sortColumn == "Room" ? "sort-active" : "")" @onclick='() => SortBy("Room")'>
+                                   Room @if (_sortColumn == "Room") { <span>@(_sortAscending ? "▲" : "▼")</span> }
+                               </button>
+                           </th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    @{
+                        var i = 0;
+                        foreach (var order in Model.Results)
+                        {
+                            var rowClass = i++ % 2 == 0 ? "odd" : "even";
+                            if (order.WorkOrder.IsOverdue())
+                            {
+                                rowClass += " overdue-row";
+                            }
+                            <tr class="@rowClass">
+                                <td>
+                                    @{
+                                        var workOrderLinkTestId = Elements.WorkOrderLink + order.Number;
+                                    }
+                                    <a data-testid="@workOrderLinkTestId" href="/workorder/manage/@order.Number?mode=Edit">
+                                        @order.Number
+                                    </a>
+                                </td>
+                                <td>@order.Creator?.GetFullName()</td>
+                                <td>@order.Assignee?.GetFullName()</td>
+                                <td>
+                                    <span class="status-badge">@order.Status</span>
+                                </td>
+                                <td>@order.Title</td>
+                                <td>
+                                    <span data-testid="@(Elements.DueDateCell + order.Number)" class="@order.DueDateCssClass">@order.DueDateDisplay@if (!string.IsNullOrEmpty(order.DueDateUrgencyText))
+                                        {
+                                            <span class="visually-hidden">@order.DueDateUrgencyText</span>
+                                        }</span>
+                                    @{ var badgeText = DueDateUrgencyCalculator.BadgeText(order.Urgency, order.WorkOrder.DueDate); }
+                                    @if (badgeText is not null)
+                                    {
+                                        var badgeCss = string.IsNullOrEmpty(order.DueDateCssClass) ? "on-track" : order.DueDateCssClass;
+                                        <span class="urgency-badge @badgeCss"
+                                              data-testid="@(Elements.UrgencyBadge + order.Number)"
+                                              aria-label="@badgeText">@badgeText</span>
+                                    }
+                                </td>
+                                <td>@order.WorkOrder.RoomNumber</td>
+                            </tr>
+                        }
+                    }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+
+    public enum Elements
+    {
+        CreatorSelect,
+        AssigneeSelect,
+        StatusSelect,
+        OverdueOnlyToggle,
+        SearchButton,
+        ClearFiltersButton,
+        WorkOrderLink,
+        DueDateCell,
+        UrgencyBadge,
+        SortByStatusButton,
+        SortByDueDateButton,
+        SortByTitleButton,
+        SortByRoomButton,
+        AssignedToMeCheckbox,
+        SearchHint,
+        SearchHeadingTooltip
+    }
+
+    public WorkOrderSearchModel Model { get; set; } = new();
+    public List<SelectListItem> UserOptions { get; set; } = new();
+    public List<SelectListItem> StatusOptions { get; set; } = new();
+    public Func<Task>? OnSearch { get; set; }
+}

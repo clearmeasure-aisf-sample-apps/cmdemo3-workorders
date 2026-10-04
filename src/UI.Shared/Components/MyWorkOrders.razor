@@ -1,0 +1,39 @@
+﻿@implements Palermo.BlazorMvc.IListener<WorkOrderChangedEvent>
+@using ClearMeasure.Bootcamp.Core.Queries
+@using ClearMeasure.Bootcamp.UI.Shared.Pages
+@inherits AppComponentBase
+@inject IUserSession UserSession
+
+<span data-testid="@Elements.MyWorkOrdersTooltip" title="Work orders assigned to you">
+    My Work Orders (@Count)
+</span>
+
+@code {
+    private Employee? _currentUser;
+    private readonly HashSet<WorkOrder> _myWorkOrders = new();
+    public int Count => _myWorkOrders.Count;
+
+    public enum Elements
+    {
+        MyWorkOrdersTooltip
+    }
+
+    public void Handle(WorkOrderChangedEvent theEvent)
+    {
+        var order = theEvent.Result.WorkOrder;
+        _myWorkOrders.Add(order);
+        InvokeAsync(StateHasChanged);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await SetCurrentUser();
+        _myWorkOrders.UnionWith(await Bus.Send(new WorkOrderSpecificationQuery { Creator = _currentUser }));
+    }
+
+    private async Task SetCurrentUser()
+    {
+        _currentUser = await UserSession!.GetCurrentUserAsync();
+    }
+
+}

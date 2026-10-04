@@ -1,0 +1,110 @@
+using System.Globalization;
+using ClearMeasure.Bootcamp.UI.Shared;
+
+namespace ClearMeasure.Bootcamp.AcceptanceTests.App;
+
+[TestFixture]
+public class CopyrightFooterTests : AcceptanceTestBase
+{
+    [Test, Retry(2)]
+    public async Task ShouldShowCopyrightFooter_OnLandingPage_WhenAnonymous()
+    {
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var footer = Page.GetByTestId(nameof(MainLayout.Elements.CopyrightFooter));
+        await footer.WaitForAsync();
+        await Expect(footer).ToBeVisibleAsync();
+
+        var yearText = DateTime.UtcNow.Year.ToString(CultureInfo.InvariantCulture);
+        await Expect(footer).ToContainTextAsync(yearText);
+        await Expect(footer).ToContainTextAsync("ClearMeasure Labs");
+
+        var link = footer.Locator("a[href*='clearmeasure.com']").First;
+        await Expect(link).ToBeVisibleAsync();
+        var href = (await link.GetAttributeAsync("href"))!.ToLowerInvariant();
+        href.ShouldStartWith("http");
+        href.ShouldContain("clearmeasure.com");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowCopyrightFooter_OnAuthenticatedRoute_AfterLogin()
+    {
+        await LoginAsCurrentUser();
+        await Click(nameof(NavMenu.Elements.Search));
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var footer = Page.GetByTestId(nameof(MainLayout.Elements.CopyrightFooter));
+        await Expect(footer).ToBeVisibleAsync();
+        var yearText = DateTime.UtcNow.Year.ToString(CultureInfo.InvariantCulture);
+        await Expect(footer).ToContainTextAsync(yearText);
+        await Expect(footer).ToContainTextAsync("ClearMeasure Labs");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowCopyrightFooter_OnNotFoundRoute()
+    {
+        await Page.GotoAsync("/this-route-does-not-exist-1842");
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var footer = Page.GetByTestId(nameof(MainLayout.Elements.CopyrightFooter));
+        await footer.WaitForAsync();
+        await footer.ScrollIntoViewIfNeededAsync();
+        await Expect(footer).ToBeVisibleAsync();
+        await Expect(Page.GetByRole(AriaRole.Alert)).ToContainTextAsync("Sorry, there's nothing at this address.");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowFooterNote_OnLandingPage_WhenAnonymous()
+    {
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var footerNote = Page.GetByTestId(nameof(MainLayout.Elements.FooterNote));
+        await footerNote.WaitForAsync();
+        await Expect(footerNote).ToBeVisibleAsync();
+        await Expect(footerNote).ToContainTextAsync("Submit a new work order any time");
+        await Expect(footerNote).ToContainTextAsync("Thank you for serving!");
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowSoftwareVersion_OnLandingPage_WhenAnonymous()
+    {
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var versionSpan = Page.GetByTestId(nameof(MainLayout.Elements.SoftwareVersion));
+        await versionSpan.WaitForAsync();
+        await Expect(versionSpan).ToBeVisibleAsync();
+        var text = await versionSpan.InnerTextAsync();
+        text.Trim().ShouldNotBeEmpty();
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowGitSha_InFooter_OnLandingPage()
+    {
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var gitSha = Page.GetByTestId(nameof(MainLayout.Elements.GitSha));
+        await gitSha.WaitForAsync();
+        await Expect(gitSha).ToBeVisibleAsync();
+
+        // When the build has a git SHA, the element is an anchor with an href to the commit.
+        // In local dev without SourceRevisionId the element falls back to a span showing "unknown".
+        var href = await gitSha.GetAttributeAsync("href");
+        if (href is not null)
+        {
+            href.ShouldContain("github.com/ClearMeasureLabs/bootcamp-palermo-workorders/commit/");
+        }
+    }
+
+    [Test, Retry(2)]
+    public async Task ShouldShowEnvironmentName_InFooter_OnLandingPage()
+    {
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var envName = Page.GetByTestId(nameof(MainLayout.Elements.EnvironmentName));
+        await envName.WaitForAsync();
+        await Expect(envName).ToBeVisibleAsync();
+
+        var text = await envName.InnerTextAsync();
+        text.Trim().ShouldNotBeEmpty();
+    }
+}

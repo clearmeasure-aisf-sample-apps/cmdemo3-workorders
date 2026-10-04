@@ -1,0 +1,829 @@
+name: Build
+# VERSION-MARKER: the "2.4." prefix below is hardcoded because GitHub Actions' run-name
+# expression context does not have access to `env` (env.MAJOR_VERSION / env.MINOR_VERSION,
+# defined below) or to any job output — run-name is evaluated before any job runs, from the
+# `github`/`inputs`/`vars`/`secrets` contexts only. If MAJOR_VERSION/MINOR_VERSION change,
+# update this literal to match.
+run-name: "2.4.${{ github.run_number }} • Build • ${{ github.event.pull_request.title != '' && github.event.pull_request.title || github.head_ref || github.ref_name }}"
+on:
+  push:
+  workflow_dispatch:
+env:
+  MAJOR_VERSION: 2
+  MINOR_VERSION: 4
+
+jobs:
+  # Docs-only skip (Scorecard semantics):
+  # - Non-master: diff against git merge-base origin/master HEAD (what the PR would
+  #   merge, not only the last push).
+  # - Master: diff against github.event.before when that SHA is valid.
+  # - Fail OPEN (code=true): missing base, first push (all-zero before), or git diff
+  #   failure — never skip Integration/Private Build because detection was unsure.
+  # - Docs-only (code=false) is an allowlist: docs/**, *.md, LICENSE*, issue
+  #   templates. src/, *.csproj, *.sln*, build scripts, Dockerfile, qodana*,
+  #   .github/workflows/**, .github/scripts/**, arch/**, NuGet/SDK config, etc.
+  #   remain code=true.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Run path-classifier tests
+        run: bash .github/scripts/detect-code-changes.tests.sh
+
+      - name: Detect code changes
+        id: detect
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          ZERO_SHA='0000000000000000000000000000000000000000'
+          changed_list="${RUNNER_TEMP:-/tmp}/changed-paths.txt"
+
+          fail_open() {
+            echo "$1"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "code=true"
+            exit 0
+          }
+
+          if [ "${GITHUB_REF}" = "refs/heads/master" ] || [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            if [ -z "${EVENT_BEFORE:-}" ] || [ "${EVENT_BEFORE}" = "${ZERO_SHA}" ]; then
+              fail_open "Master/main first push or missing event.before; fail-open code=true."
+            fi
+            if ! git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
+              fail_open "event.before ${EVENT_BEFORE} is not in this clone; fail-open code=true."
+            fi
+            BASE="${EVENT_BEFORE}"
+          else
+            git fetch --no-tags origin master:refs/remotes/origin/master || git fetch --no-tags origin main:refs/remotes/origin/main || true
+            if git rev-parse --verify origin/master >/dev/null 2>&1; then
+              default_base=origin/master
+            elif git rev-parse --verify origin/main >/dev/null 2>&1; then
+              default_base=origin/main
+            else
+              fail_open "Neither origin/master nor origin/main is available; fail-open code=true."
+            fi
+            if ! BASE="$(git merge-base "${default_base}" HEAD)"; then
+              fail_open "git merge-base ${default_base} HEAD failed; fail-open code=true."
+            fi
+          fi
+
+          echo "Diff base: ${BASE}"
+          echo "HEAD: $(git rev-parse HEAD)"
+
+          # --no-renames: a code-to-docs rename still lists the removed code path.
+          if ! git diff --name-only --no-renames "${BASE}" HEAD > "${changed_list}"; then
+            fail_open "git diff failed; fail-open code=true."
+          fi
+
+          echo "Changed paths:"
+          cat "${changed_list}"
+
+          bash .github/scripts/detect-code-changes.sh --from-list "${changed_list}"
+
+  build-linux:
+    name: Integration Build (SQL container)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      # Cancelled when new commits arrive on the same non-master branch/PR; on master,
+      # cancel-in-progress is disabled below so builds queue instead of being dropped.
+      group: build-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    env:
+      BUILD_CONFIGURATION: Release
+      DOTNET_ROLL_FORWARD: LatestMajor
+
+    steps:
+      # Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      # Set version environment variable
+      - name: Set Version
+        run: |
+          version="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          echo "BUILD_BUILDNUMBER=$version" >> $GITHUB_ENV
+          echo "VERSION=$version" >> $GITHUB_ENV
+          echo "$version" > build_version.txt
+          echo "Build version: $version"
+          echo "github.ref=${{ github.ref }}"
+
+      - name: Run CI Build
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BUILD_BUILDNUMBER: ${{ env.VERSION }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+        run: |
+          Write-Host "Running CI Build"
+          . ./build.ps1
+          Build
+
+      - name: Enforce CRAP (production)
+        shell: pwsh
+        run: |
+          # Threshold from scripts/crap/crap-gate-threshold.json (single source of truth).
+          pwsh scripts/crap/run-crap-audit.ps1 -SkipTests -FailOnViolations
+
+      - name: Publish CRAP summary to job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = "crap-metrics/crap-summary.md"
+          if (Test-Path $summary) {
+            Get-Content -LiteralPath $summary -Raw | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          } else {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "## CRAP summary`n`n``crap-summary.md`` was not produced."
+          }
+
+      # Publish CRAP reports (method report, file rollups, summary, gate result) as a downloadable artifact
+      - name: Upload CRAP metrics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crap-metrics-linux
+          path: |
+            crap-metrics/crap-report.json
+            crap-metrics/crap-by-file.json
+            crap-metrics/crap-by-file.csv
+            crap-metrics/crap-summary.md
+            crap-metrics/crap-production-violations.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Publish test results
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: Linux CI Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      # Publish code coverage
+      - name: Publish Code Coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: '**/build/test/**/In/**/coverage.cobertura.xml'
+          flags: unittests-linux
+          name: codecov-linux
+
+      # Upload test results as artifacts
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-linux
+          path: build/test/**/*.trx
+          retention-days: 2
+
+      # Upload code coverage as artifacts
+      - name: Upload Code Coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-coverage-linux
+          path: '**/build/test/**/In/**/coverage.cobertura.xml'
+          retention-days: 2
+
+      # Package Everything as NuGet Packages
+      - name: Create NuGet Packages
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BUILD_BUILDNUMBER: ${{ env.VERSION }}
+        run: |
+          . ./build.ps1
+          Package-Everything
+
+      # Upload packages as artifacts
+      - name: Upload NuGet Package artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: churchbulletin-nuget-packages
+          path: build/*.nupkg
+          retention-days: 2
+
+      - name: Upload build_version.txt artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: build-version
+          path: build_version.txt
+          retention-days: 2
+
+  build-sqlite:
+    name: Integration Build (SQLite)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: build-sqlite-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILD_CONFIGURATION: Release
+      DATABASE_ENGINE: SQLite
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set Version
+        run: |
+          version="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          echo "BUILD_BUILDNUMBER=$version" >> $GITHUB_ENV
+
+      - name: Run Private Build (SQLite)
+        shell: pwsh
+        env:
+          BUILD_BUILDNUMBER: ${{ env.BUILD_BUILDNUMBER }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+          ConnectionStrings__SqlConnectionString: "Data Source=ChurchBulletin.db"
+        run: |
+          Write-Host "Running Private Build with SQLite"
+          . ./build.ps1
+          Build -UseSqlite
+ 
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: SQLite Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-sqlite
+          path: build/test/**/*.trx
+          retention-days: 2
+
+  integration-build-arm:
+    name: Integration Build (ARM SQLite)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: build-arm-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILD_CONFIGURATION: Release
+      DATABASE_ENGINE: SQLite
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set Version
+        run: |
+          version="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          echo "BUILD_BUILDNUMBER=$version" >> $GITHUB_ENV
+
+      - name: Run Private Build (ARM SQLite)
+        shell: pwsh
+        env:
+          BUILD_BUILDNUMBER: ${{ env.BUILD_BUILDNUMBER }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+          ConnectionStrings__SqlConnectionString: "Data Source=ChurchBulletin.db"
+        run: |
+          Write-Host "Running Private Build with SQLite on ARM"
+          . ./build.ps1
+          Build -UseSqlite
+
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: ARM SQLite Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-arm-sqlite
+          path: build/test/**/*.trx
+          retention-days: 2
+
+  code-analysis:
+    name: Code Analysis
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: code-analysis-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore solution
+        run: dotnet restore src/ChurchBulletin.sln
+
+      - name: Check code style
+        run: dotnet format style src/ChurchBulletin.sln --verify-no-changes --verbosity normal
+
+      - name: Check analyzers
+        run: dotnet format analyzers src/ChurchBulletin.sln --verify-no-changes --verbosity normal
+
+      - name: Build with code analysis
+        run: |
+          dotnet build src/ChurchBulletin.sln --configuration Release --no-restore \
+            /p:TreatWarningsAsErrors=true \
+            /p:MSBuildTreatAllWarningsAsErrors=true \
+            /p:EnforceCodeStyleInBuild=true
+
+  qodana:
+    name: Qodana (Community .NET)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: qodana-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Qodana Scan
+        uses: JetBrains/qodana-action@v2025.2
+        # Hard gate (#8846): failThreshold 0 + committed baseline (qodana.sarif.json).
+        # Unchanged baselined findings do not fail; new/absent problems do.
+        with:
+          args: --linter,jetbrains/qodana-cdnet:latest,--solution,src/ChurchBulletin.sln,--baseline,qodana.sarif.json,--fail-threshold,0
+          results-dir: ${{ runner.temp }}/qodana/results
+          upload-result: true
+          artifact-name: qodana-report
+          pr-mode: false
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ runner.temp }}/qodana/results/qodana.sarif.json
+
+  build-windows:
+    name: Integration Build (Windows LocalDB)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    concurrency:
+      group: build-windows-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILD_CONFIGURATION: Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set Version
+        shell: pwsh
+        run: |
+          $version = "${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          "BUILD_BUILDNUMBER=$version" >> $env:GITHUB_ENV
+
+      - name: Run Private Build (Windows LocalDB)
+        shell: pwsh
+        env:
+          BUILD_BUILDNUMBER: ${{ env.BUILD_BUILDNUMBER }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+        run: |
+          Write-Host "Running Private Build with Windows LocalDB"
+          . ./build.ps1
+          Build
+
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: Windows LocalDB Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-windows
+          path: build/test/**/*.trx
+          retention-days: 2
+
+  publish-github-packages:
+    name: Publish to GitHub Packages
+    needs: [changes, build-linux]
+    if: success() && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download NuGet Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: churchbulletin-nuget-packages
+          path: ./packages
+
+      - name: Publish nupkgs to GitHub Packages
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          FEED_URL="https://nuget.pkg.github.com/$OWNER/index.json"
+
+          echo "Publishing packages to GitHub Packages..."
+          for package in packages/*.nupkg; do
+            if [ -f "$package" ]; then
+              echo "Publishing $package..."
+              dotnet nuget push "$package" \
+                --source "$FEED_URL" \
+                --api-key "$NUGET_AUTH_TOKEN" \
+                --timeout 600 \
+                --skip-duplicate || echo "Warning: Failed to publish $package (may already exist)"
+            fi
+          done
+
+  security-scan:
+    name: Security Scan
+    needs: changes
+    if: false && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: security-scan-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore solution
+        run: dotnet restore src/ChurchBulletin.sln
+
+      - name: Check NuGet packages for known vulnerabilities
+        run: |
+          echo "Scanning NuGet packages for known vulnerabilities..."
+          dotnet list src/ChurchBulletin.sln package --vulnerable --include-transitive 2>&1 | tee vulnerability-report.txt
+          if grep -q "has the following vulnerable packages" vulnerability-report.txt; then
+            echo "::error::Vulnerable NuGet packages detected"
+            exit 1
+          fi
+          echo "No known vulnerabilities found."
+
+      - name: Check for deprecated NuGet packages
+        run: |
+          echo "Scanning for deprecated NuGet packages..."
+          dotnet list src/ChurchBulletin.sln package --deprecated 2>&1 | tee deprecated-report.txt
+          if grep -q "has the following deprecated packages" deprecated-report.txt; then
+            echo "::warning::Deprecated NuGet packages detected. Review deprecated-report.txt for details."
+          else
+            echo "No deprecated packages found."
+          fi
+
+      - name: Scan for secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Scan for credential files in repository
+        run: |
+          echo "Scanning for potential credential and secret files..."
+          FOUND=0
+          # Check for files that commonly contain secrets
+          for pattern in "*.pfx" "*.p12" "*.key" "*.pem" "*.env" "*.env.*" "credentials.json" "service-account*.json"; do
+            MATCHES=$(find . -name "$pattern" -not -path "./.git/*" -not -path "*/bin/*" -not -path "*/obj/*" 2>/dev/null)
+            if [ -n "$MATCHES" ]; then
+              echo "::warning::Potential secret file(s) matching '$pattern':"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No credential files detected."
+          fi
+
+      - name: Check for security-sensitive patterns in code
+        run: |
+          echo "Scanning source code for security-sensitive patterns..."
+          ISSUES=0
+          # Hardcoded connection strings (not in config files)
+          if grep -rn "Password=" src/ --include="*.cs" | grep -v "// " | grep -v "test" | grep -vi "stub" | grep -v "obj/" | grep -v "bin/"; then
+            echo "::warning::Potential hardcoded connection string with password found in source code."
+            ISSUES=$((ISSUES + 1))
+          fi
+          # Hardcoded API keys or tokens
+          if grep -rn "api[_-]\?key\s*=\s*\"[A-Za-z0-9]" src/ --include="*.cs" -i | grep -v "// " | grep -v "Configuration" | grep -v "appsettings" | grep -v "obj/" | grep -v "bin/"; then
+            echo "::warning::Potential hardcoded API key found in source code."
+            ISSUES=$((ISSUES + 1))
+          fi
+          if [ "$ISSUES" -eq 0 ]; then
+            echo "No security-sensitive patterns detected."
+          fi
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            vulnerability-report.txt
+            deprecated-report.txt
+          retention-days: 2
+
+  acceptance-tests:
+    name: Acceptance Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: acceptance-tests-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILD_CONFIGURATION: Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/AcceptanceTests/AcceptanceTests.csproj') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set Version
+        run: |
+          version="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          echo "BUILD_BUILDNUMBER=$version" >> $GITHUB_ENV
+
+      - name: Run Acceptance Tests
+        shell: pwsh
+        env:
+          BUILD_BUILDNUMBER: ${{ env.BUILD_BUILDNUMBER }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+        run: |
+          Write-Host "Running Acceptance Tests"
+          . ./build.ps1
+          Invoke-AcceptanceTests
+
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: Acceptance Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-acceptance
+          path: build/test/**/*.trx
+          retention-days: 2
+
+  acceptance-tests-arm:
+    name: Acceptance Tests (ARM SQLite)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    concurrency:
+      group: acceptance-tests-arm-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILD_CONFIGURATION: Release
+      DATABASE_ENGINE: SQLite
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.1
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/AcceptanceTests/AcceptanceTests.csproj') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set Version
+        run: |
+          version="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
+          echo "BUILD_BUILDNUMBER=$version" >> $GITHUB_ENV
+
+      - name: Run Acceptance Tests (ARM SQLite)
+        shell: pwsh
+        env:
+          BUILD_BUILDNUMBER: ${{ env.BUILD_BUILDNUMBER }}
+          AI_OpenAI_ApiKey: ${{ secrets.AI_OPENAI_APIKEY }}
+          AI_OpenAI_Url: ${{ vars.AI_OPENAI_URL }}
+          AI_OpenAI_Model: ${{ vars.AI_OPENAI_MODEL }}
+          ConnectionStrings__SqlConnectionString: "Data Source=ChurchBulletin.db"
+        run: |
+          Write-Host "Running Acceptance Tests with SQLite on ARM"
+          . ./build.ps1
+          Invoke-AcceptanceTests -UseSqlite
+
+      - name: Test Reporter
+        uses: dorny/test-reporter@v2.1.1
+        if: always()
+        with:
+          name: ARM Acceptance Test Results
+          path: 'build/test/**/*.trx'
+          reporter: dotnet-trx
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-acceptance-arm
+          path: build/test/**/*.trx
+          retention-days: 2
+
+  build-result:
+    name: Build result
+    needs:
+      - changes
+      - build-linux
+      - build-sqlite
+      - integration-build-arm
+      - code-analysis
+      - qodana
+      - build-windows
+      - acceptance-tests
+      - acceptance-tests-arm
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate gated jobs
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          LINUX: ${{ needs.build-linux.result }}
+          SQLITE: ${{ needs.build-sqlite.result }}
+          ARM: ${{ needs.integration-build-arm.result }}
+          ANALYSIS: ${{ needs.code-analysis.result }}
+          QODANA: ${{ needs.qodana.result }}
+          WINDOWS: ${{ needs.build-windows.result }}
+          ACCEPTANCE: ${{ needs.acceptance-tests.result }}
+          ACCEPTANCE_ARM: ${{ needs.acceptance-tests-arm.result }}
+        run: |
+          set -euo pipefail
+          if [ "${CODE}" != "true" ]; then
+            echo "Docs-only change set; heavy jobs skipped."
+            exit 0
+          fi
+          failed=0
+          check() {
+            local name="$1"
+            local result="$2"
+            echo "${name}: ${result}"
+            if [ "${result}" != "success" ]; then
+              failed=1
+            fi
+          }
+          check "Integration Build (SQL container)" "${LINUX}"
+          check "Integration Build (SQLite)" "${SQLITE}"
+          check "Integration Build (ARM SQLite)" "${ARM}"
+          check "Code Analysis" "${ANALYSIS}"
+          check "Qodana (Community .NET)" "${QODANA}"
+          check "Integration Build (Windows LocalDB)" "${WINDOWS}"
+          check "Acceptance Tests" "${ACCEPTANCE}"
+          check "Acceptance Tests (ARM SQLite)" "${ACCEPTANCE_ARM}"
+          if [ "${failed}" -ne 0 ]; then
+            echo "A required Build job did not succeed."
+            exit 1
+          fi
+          echo "All required Build jobs succeeded."
+

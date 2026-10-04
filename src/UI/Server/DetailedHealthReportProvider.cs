@@ -1,0 +1,123 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using ClearMeasure.Bootcamp.UI.Api;
+
+namespace ClearMeasure.Bootcamp.UI.Server;
+
+/// <summary>
+/// Aggregates <see cref="HealthCheckService"/> results into <see cref="DetailedHealthReport"/>.
+/// </summary>
+public sealed class DetailedHealthReportProvider(
+    HealthCheckService healthCheckService,
+    TimeProvider timeProvider) : IDetailedHealthReportProvider
+{
+    /// <inheritdoc />
+    public async Task<DetailedHealthReport> GetReportAsync(CancellationToken cancellationToken = default)
+    {
+        var report = await healthCheckService.CheckHealthAsync(
+            IncludeInDetailedReport,
+            cancellationToken);
+
+        return FromHealthReport(report, timeProvider);
+    }
+
+    /// <summary>
+    /// Omits Aspire/liveness-only checks tagged <c>live</c> from the detailed API report.
+    /// </summary>
+    internal static bool IncludeInDetailedReport(HealthCheckRegistration registration) =>
+        !registration.Tags.Contains("live");
+
+    internal static DetailedHealthReport FromHealthReport(HealthReport report, TimeProvider clock)
+    {
+        var components = report.Entries
+            .Select(pair => BuildComponentEntry(pair.Key, pair.Value))
+            .OrderBy(c => c.Name, StringComparer.Ordinal)
+            .ToList();
+
+        return new DetailedHealthReport
+        {
+            CheckedAtUtc = clock.GetUtcNow().UtcDateTime,
+            ProcessId = Environment.ProcessId,
+            OsDescription = RuntimeInformation.OSDescription,
+            FrameworkDescription = RuntimeInformation.FrameworkDescription,
+            GcMemoryMb = GetGcMemoryMb(),
+            WorkingSetMb = GetWorkingSetMb(),
+            ProcessorCount = Environment.ProcessorCount,
+            Is64BitProcess = Environment.Is64BitProcess,
+            TimeZoneId = TimeZoneInfo.Local.Id,
+            ProcessPriority = GetProcessPriority(),
+            Components = components,
+            OverallStatus = MapOverallStatus(report.Status)
+        };
+    }
+
+    internal static DetailedHealthReport FromComponentStatuses(
+        IEnumerable<KeyValuePair<string, HealthStatus>> entries,
+        HealthStatus aggregateStatus,
+        TimeProvider clock)
+    {
+        var components = entries
+            .Select(pair => new ComponentHealthEntry
+            {
+                Name = pair.Key,
+                Status = MapComponentStatus(pair.Value)
+            })
+            .OrderBy(c => c.Name, StringComparer.Ordinal)
+            .ToList();
+
+        return new DetailedHealthReport
+        {
+            CheckedAtUtc = clock.GetUtcNow().UtcDateTime,
+            ProcessId = Environment.ProcessId,
+            OsDescription = RuntimeInformation.OSDescription,
+            FrameworkDescription = RuntimeInformation.FrameworkDescription,
+            GcMemoryMb = GetGcMemoryMb(),
+            WorkingSetMb = GetWorkingSetMb(),
+            ProcessorCount = Environment.ProcessorCount,
+            Is64BitProcess = Environment.Is64BitProcess,
+            TimeZoneId = TimeZoneInfo.Local.Id,
+            ProcessPriority = GetProcessPriority(),
+            Components = components,
+            OverallStatus = MapOverallStatus(aggregateStatus)
+        };
+    }
+
+    internal static int GetGcMemoryMb() =>
+        (int)Math.Round(GC.GetTotalMemory(false) / 1_048_576.0);
+
+    internal static int GetWorkingSetMb() =>
+        (int)Math.Round(Environment.WorkingSet / 1_048_576.0);
+
+    internal static string GetProcessPriority() =>
+        Process.GetCurrentProcess().PriorityClass.ToString();
+
+    private static string MapOverallStatus(HealthStatus status) => status switch
+    {
+        HealthStatus.Unhealthy => ComponentHealthStatus.Unhealthy,
+        HealthStatus.Degraded => ComponentHealthStatus.Degraded,
+        _ => ComponentHealthStatus.Healthy
+    };
+
+    private static string MapComponentStatus(HealthStatus status) => status switch
+    {
+        HealthStatus.Unhealthy => ComponentHealthStatus.Unhealthy,
+        HealthStatus.Degraded => ComponentHealthStatus.Degraded,
+        _ => ComponentHealthStatus.Healthy
+    };
+
+    internal static ComponentHealthEntry BuildComponentEntry(string name, HealthReportEntry entry)
+    {
+        return new ComponentHealthEntry
+        {
+            Name = name,
+            Status = MapComponentStatus(entry.Status),
+            Description = entry.Description,
+            ExceptionMessage = entry.Exception?.Message,
+            ExceptionDetail = entry.Exception?.ToString(),
+            DurationMs = entry.Duration.TotalMilliseconds,
+            Data = entry.Data.Count > 0
+                ? entry.Data.ToDictionary(d => d.Key, d => d.Value)
+                : null
+        };
+    }
+}

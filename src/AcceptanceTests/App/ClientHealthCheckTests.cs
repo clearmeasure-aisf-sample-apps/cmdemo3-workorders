@@ -1,0 +1,64 @@
+using ClearMeasure.Bootcamp.UI.Client.Pages;
+using ClearMeasure.Bootcamp.UI.Shared.Components;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+
+namespace ClearMeasure.Bootcamp.AcceptanceTests.App;
+
+[TestFixture]
+public class ClientHealthCheckTests : AcceptanceTestBase
+{
+    private static readonly string[] AcceptableHealthStatuses =
+    [
+        nameof(HealthStatus.Healthy),
+        nameof(HealthStatus.Degraded),
+        nameof(HealthStatus.Unhealthy)
+    ];
+
+    [Test, Retry(2)]
+    public async Task FirstStartShouldValidateClientHealthChecks()
+    {
+        await Page.GotoAsync("/_clienthealthcheck");
+        var statusSpan = Page.GetByTestId(nameof(ClientHealthCheck.Elements.Status));
+        await statusSpan.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 90_000 });
+        var innerTextAsync = await statusSpan.InnerTextAsync();
+        innerTextAsync.ShouldBeOneOf(AcceptableHealthStatuses);
+        AcceptableHealthStatuses.ShouldContain(innerTextAsync);
+    }
+
+    [Test, Retry(2)]
+    public async Task Should_NavigateToHealthCheck_WhenGearIconClicked()
+    {
+        await Page.GotoAsync("/");
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        await Click(nameof(HealthCheckLink.Elements.HealthCheckLink));
+
+        await Page.WaitForURLAsync("**/_clienthealthcheck");
+        Page.Url.ShouldContain("/_clienthealthcheck");
+
+        var statusSpan = Page.GetByTestId(nameof(ClientHealthCheck.Elements.Status));
+        await statusSpan.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 90_000 });
+        var innerTextAsync = await statusSpan.InnerTextAsync();
+        AcceptableHealthStatuses.ShouldContain(innerTextAsync);
+    }
+
+    [Test, Retry(2)]
+    public async Task FirstStartShouldValidateServerHealthChecks()
+    {
+        await Page.GotoAsync("/_healthcheck");
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        var content = await Page.ContentAsync();
+        AcceptableHealthStatuses.ShouldContain(s =>
+            content.Contains(s, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Test, Retry(2)]
+    public async Task HealthCheckEndpoint_ShouldReturnHealthy()
+    {
+        await Page.GotoAsync("/_healthcheck");
+        await Page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        var content = await Page.ContentAsync();
+        AcceptableHealthStatuses.ShouldContain(s =>
+            content.Contains(s, StringComparison.OrdinalIgnoreCase));
+    }
+}

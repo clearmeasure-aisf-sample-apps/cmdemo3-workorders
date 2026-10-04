@@ -1,0 +1,253 @@
+using ClearMeasure.Bootcamp.Core;
+using ClearMeasure.Bootcamp.Core.Model.Messages;
+using ClearMeasure.Bootcamp.Core.Services;
+using ClearMeasure.Bootcamp.DataAccess.Mappings;
+using ClearMeasure.Bootcamp.DataAccess.Messaging;
+using ClearMeasure.Bootcamp.IntegrationTests.Handlers;
+using ClearMeasure.Bootcamp.LlmGateway;
+using ClearMeasure.Bootcamp.McpServer.Tools;
+using ClearMeasure.Bootcamp.UI.Server;
+using ClearMeasure.Bootcamp.UnitTests;
+using Lamar.Microsoft.DependencyInjection;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using NServiceBus.Features;
+
+namespace ClearMeasure.Bootcamp.IntegrationTests;
+
+public static class TestHost
+{
+    public static DateTimeOffset TestTime { get; } = new(2000, 1, 1, 1, 1, 1, TimeSpan.Zero);
+    private static bool _dependenciesRegistered;
+    private static readonly Lock DependenciesRegistrationLock = new();
+    private static IHost? _host;
+
+    private static IHost Instance
+    {
+        get
+        {
+            EnsureDependenciesRegistered();
+            return _host!;
+        }
+    }
+
+    public static T GetRequiredService<T>(bool newScope = true) where T : notnull
+    {
+        EnsureDependenciesRegistered();
+        if (newScope)
+        {
+            var serviceScope = Instance.Services.CreateScope();
+            var provider = serviceScope.ServiceProvider;
+            return provider.GetRequiredService<T>();
+        }
+
+        return Instance.Services.GetRequiredService<T>();
+    }
+
+    private static void Initialize()
+    {
+        var host = Host.CreateDefaultBuilder()
+            .UseEnvironment("Development")
+            .UseLamar(registry => { registry.IncludeRegistry<UiServiceRegistry>(); })
+            .ConfigureLogging(builder => builder.AddConsole().SetMinimumLevel(LogLevel.Debug))
+            .ConfigureAppConfiguration((context, config) =>
+            {
+                var env = context.HostingEnvironment;
+
+                config
+                    .AddJsonFile($"appsettings.{env.EnvironmentName}.json", true)
+                    .AddJsonFile("appsettings.acceptancetests.json", true, true)
+                    .AddJsonFile("appsettings.test.json", false, true)
+                    .AddUserSecrets<TestDatabaseConfiguration>(optional: true);
+
+                if (string.Equals(Environment.GetEnvironmentVariable("DATABASE_ENGINE"), "SQLite",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    var sqliteConnection = Environment.GetEnvironmentVariable("ConnectionStrings__SqlConnectionString")
+                        ?? "Data Source=integration-tests.db";
+                    config.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["ConnectionStrings:SqlConnectionString"] = sqliteConnection
+                    });
+                }
+                else if (OperatingSystem.IsLinux()
+                    && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ConnectionStrings__SqlConnectionString")))
+                {
+                    var interim = config.Build();
+                    var connectionString = interim.GetConnectionString("SqlConnectionString") ?? "";
+                    if (connectionString.Contains("LocalDb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        config.AddInMemoryCollection(new Dictionary<string, string?>
+                        {
+                            ["ConnectionStrings:SqlConnectionString"] = "Data Source=integration-tests.db"
+                        });
+                    }
+                }
+
+                config.AddEnvironmentVariables();
+            })
+            .ConfigureServices(s =>
+            {
+                s.AddTransient<IDatabaseConfiguration, TestDatabaseConfiguration>();
+                var stubTimeProvider = new StubTimeProvider(TestTime);
+                s.AddSingleton<TimeProvider>(stubTimeProvider);
+                s.AddScoped<IDistributedBus, DistributedBus>();
+                s.AddTransient<IToolProvider, InProcessToolProvider>();
+            })
+            .UseNServiceBus(context =>
+            {
+                var endpointConfiguration = new EndpointConfiguration("IntegrationTests");
+                endpointConfiguration.UseSerialization<SystemJsonSerializer>();
+                endpointConfiguration.EnableInstallers();
+
+                var connectionString = context.Configuration.GetConnectionString("SqlConnectionString") ?? "";
+                if (connectionString.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
+                {
+                    var learningTransport = endpointConfiguration.UseTransport<LearningTransport>();
+                    learningTransport.Routing()
+                        .RouteToEndpoint(typeof(TracerBulletCommand), "WorkOrderProcessing");
+                    endpointConfiguration.DisableFeature<Sagas>();
+                }
+                else
+                {
+                    var transport = endpointConfiguration.UseTransport<SqlServerTransport>();
+                    transport.ConnectionString(connectionString);
+                    transport.DefaultSchema("nServiceBus");
+                    transport.Transactions(TransportTransactionMode.TransactionScope);
+                    transport.Routing()
+                        .RouteToEndpoint(typeof(TracerBulletCommand), "WorkOrderProcessing");
+                }
+
+                var conventions = new MessagingConventions();
+                endpointConfiguration.Conventions().Add(conventions);
+
+                // Worker hosts its own endpoint; scanning Worker.dll here discovers
+                // AiBotWorkOrderSaga without saga persistence and breaks TestHost startup.
+                endpointConfiguration.AssemblyScanner().ExcludeAssemblies("Worker.dll");
+                endpointConfiguration.ExecuteTheseHandlersFirst(typeof(TracerBulletReplyHandler));
+
+                return endpointConfiguration;
+            })
+            .Build();
+
+        host.Start();
+        _host = host;
+    }
+
+    private class StubTimeProvider(DateTimeOffset testTime) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow()
+        {
+            return testTime;
+        }
+    }
+
+    /// <summary>
+    /// Provides tools directly via AIFunctionFactory for integration tests
+    /// that don't have a running MCP server.
+    /// </summary>
+    private class InProcessToolProvider(IServiceProvider serviceProvider) : IToolProvider
+    {
+        private IBus CreateScopedBus()
+        {
+            var scope = serviceProvider.CreateScope();
+            return scope.ServiceProvider.GetRequiredService<IBus>();
+        }
+
+        private IWorkOrderNumberGenerator CreateScopedNumberGenerator()
+        {
+            var scope = serviceProvider.CreateScope();
+            return scope.ServiceProvider.GetRequiredService<IWorkOrderNumberGenerator>();
+        }
+
+        public Task<IList<AITool>> GetToolsAsync()
+        {
+            IList<AITool> tools =
+            [
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("Optional status filter")] string? status = null)
+                        => WorkOrderTools.ListWorkOrders(CreateScopedBus(), status),
+                    "ListWorkOrders",
+                    "Lists all work orders, optionally filtered by status."),
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("The work order number")] string workOrderNumber)
+                        => WorkOrderTools.GetWorkOrder(CreateScopedBus(), workOrderNumber),
+                    "GetWorkOrder",
+                    "Retrieves a single work order by its number."),
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("Title")] string title,
+                     [System.ComponentModel.Description("Description")] string description,
+                     [System.ComponentModel.Description("Creator username")] string creatorUsername,
+                     [System.ComponentModel.Description("Optional room number")] string? roomNumber = null,
+                     [System.ComponentModel.Description("Optional due date yyyy-MM-dd")] string? dueDate = null)
+                        => WorkOrderTools.CreateWorkOrder(CreateScopedBus(), CreateScopedNumberGenerator(), title, description, creatorUsername, roomNumber, dueDate),
+                    "CreateWorkOrder",
+                    "Creates a new draft work order."),
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("Creator username")] string creatorUsername,
+                     [System.ComponentModel.Description("Assignee username")] string assigneeUsername,
+                     [System.ComponentModel.Description("Title")] string title,
+                     [System.ComponentModel.Description("Description")] string description,
+                     [System.ComponentModel.Description("Optional comma-separated due dates yyyy-MM-dd")] string? dueDates = null,
+                     [System.ComponentModel.Description("Saturday count when dueDates omitted")] int saturdayCount = 10)
+                        => WorkOrderTools.CreateDatedWorkOrders(
+                            CreateScopedBus(),
+                            serviceProvider.GetRequiredService<TimeProvider>(),
+                            creatorUsername,
+                            assigneeUsername,
+                            title,
+                            description,
+                            dueDates,
+                            saturdayCount),
+                    "create-dated-work-orders",
+                    "Creates multiple dated assigned work orders in one transaction."),
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("Work order number")] string workOrderNumber,
+                     [System.ComponentModel.Description("Command name")] string commandName ,
+                     [System.ComponentModel.Description("Executing username")] string executingUsername,
+                     [System.ComponentModel.Description("Assignee username")] string? assigneeUsername = null)
+                        => WorkOrderTools.ExecuteWorkOrderCommand(CreateScopedBus(), workOrderNumber, commandName, executingUsername, assigneeUsername),
+                    "ExecuteWorkOrderCommand",
+                    "Executes a state command on a work order."),
+                AIFunctionFactory.Create(
+                    () => EmployeeTools.ListEmployees(CreateScopedBus()),
+                    "ListEmployees",
+                    "Lists all employees."),
+                AIFunctionFactory.Create(
+                    ([System.ComponentModel.Description("Username")] string username)
+                        => EmployeeTools.GetEmployee(CreateScopedBus(), username),
+                    "GetEmployee",
+                    "Retrieves a single employee by username."),
+            ];
+            return Task.FromResult(tools);
+        }
+    }
+
+    private static void EnsureDependenciesRegistered()
+    {
+        if (!_dependenciesRegistered)
+        {
+            lock (DependenciesRegistrationLock)
+            {
+                if (!_dependenciesRegistered)
+                {
+                    Initialize();
+                    _dependenciesRegistered = true;
+                }
+            }
+        }
+    }
+
+    public static DataContext NewDbContext()
+    {
+        return GetRequiredService<DataContext>();
+    }
+
+    public static TK Faker<TK>()
+    {
+        return ObjectMother.Faker<TK>();
+    }
+}

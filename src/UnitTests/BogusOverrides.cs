@@ -1,0 +1,40 @@
+﻿using AutoBogus;
+using Bogus.Extensions;
+using ClearMeasure.Bootcamp.Core.Model;
+using ClearMeasure.Bootcamp.Core.Queries;
+using ClearMeasure.Bootcamp.Core.Services.Impl;
+
+namespace ClearMeasure.Bootcamp.UnitTests;
+
+internal class BogusOverrides : AutoGeneratorOverride
+{
+    public override bool CanOverride(AutoGenerateContext context)
+    {
+        return true;
+    }
+
+    public override void Generate(AutoGenerateOverrideContext context)
+    {
+        switch (context.Instance)
+        {
+            case WorkOrder order:
+                order.Number = new WorkOrderNumberGenerator().GenerateNumber();
+                order.Title = order.Title.ClampLength(1, 200);        // HasMaxLength(200)
+                order.Description = order.Description.ClampLength(1, 4000); // HasMaxLength(4000)
+                order.RoomNumber = order.RoomNumber.ClampLength(1, WorkOrder.RoomNumberMaxLength);
+                order.DueDate = context.Faker.Random.Bool()
+                    ? DateOnly.FromDateTime(context.Faker.Date.Past())
+                    : null;
+                break;
+            case WorkOrderStatus:
+                context.Instance = context.Faker.PickRandom(WorkOrderStatus.GetAllItems());
+                break;
+            case WorkOrderSpecificationQuery query:
+                query.StatusKey = context.Faker.PickRandom(WorkOrderStatus.GetAllItems()).Key;
+                break;
+            case Employee employee:
+                employee.PreferredLanguage = context.Faker.PickRandom("en-US", "es-ES", "fr-FR", "de-DE", "pt-BR");
+                break;
+        }
+    }
+}

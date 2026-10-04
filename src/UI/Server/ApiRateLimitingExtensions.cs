@@ -1,0 +1,79 @@
+using System.Threading.RateLimiting;
+using ClearMeasure.Bootcamp.UI.Shared;
+using Microsoft.Extensions.Options;
+
+// ReSharper disable UnusedMethodReturnValue.Global -- Qodana C6 (#9039): fluent
+// IServiceCollection extension-method pattern; chained return value is by design, not always used.
+namespace ClearMeasure.Bootcamp.UI.Server;
+
+/// <summary>
+/// Registers partitioned sliding-window rate limiting used by <see cref="RateLimiting.RateLimitingMiddleware"/>.
+/// </summary>
+public static class ApiRateLimitingExtensions
+{
+    /// <summary>
+    /// Binds <see cref="ApiRateLimitingOptions"/> and registers the shared <see cref="PartitionedRateLimiter{TResource}"/> for API routes.
+    /// </summary>
+    public static IServiceCollection AddApiRateLimiting(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<ApiRateLimitingOptions>(configuration.GetSection(ApiRateLimitingOptions.SectionName));
+        services.AddSingleton(CreatePartitionedLimiter);
+        return services;
+    }
+
+    private static PartitionedRateLimiter<HttpContext> CreatePartitionedLimiter(IServiceProvider sp)
+    {
+        var monitor = sp.GetRequiredService<IOptionsMonitor<ApiRateLimitingOptions>>();
+        return PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        {
+            var opts = monitor.CurrentValue;
+            if (!opts.Enabled || !ShouldApplyToPath(httpContext.Request.Path))
+            {
+                return RateLimitPartition.GetNoLimiter(string.Empty);
+            }
+
+            var window = TimeSpan.FromSeconds(Math.Max(1, opts.WindowSeconds));
+            var partitionKey = ResolvePartitionKey(httpContext, opts.ApiKeyHeaderName);
+
+            return RateLimitPartition.GetSlidingWindowLimiter(
+                partitionKey,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = Math.Max(1, opts.PermitLimit),
+                    Window = window,
+                    SegmentsPerWindow = Math.Max(1, opts.SegmentsPerWindow),
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit = Math.Max(0, opts.QueueLimit),
+                    AutoReplenishment = true
+                });
+        });
+    }
+
+    private static readonly PathString ApiPrefix = new("/api");
+
+    private static readonly PathString BlazorSingleApiPath = new("/" + WebServiceApiRoutes.LegacyRelativeUrl);
+
+    private static readonly PathString BlazorSingleApiPathV1 =
+        new("/api/v1.0/" + WebServiceApiRoutes.AbstractPathSegment);
+
+    /// <remarks>
+    /// gRPC requests are not matched by this helper, so they are not subject to the API sliding-window policy.
+    /// </remarks>
+    internal static bool ShouldApplyToPath(PathString path)
+    {
+        if (path.StartsWithSegments(ApiPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (path.StartsWithSegments(BlazorSingleApiPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return path.StartsWithSegments(BlazorSingleApiPathV1, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string ResolvePartitionKey(HttpContext httpContext, string apiKeyHeaderName) =>
+        ApiRateLimitPartitionResolver.Resolve(httpContext, apiKeyHeaderName);
+}
