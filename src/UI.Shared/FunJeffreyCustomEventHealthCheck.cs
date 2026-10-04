@@ -16,7 +16,7 @@ public class FunJeffreyCustomEventHealthCheck(
         CancellationToken cancellationToken = new())
     {
         var now = time.GetLocalNow();
-        using var activity = ActivitySource.StartActivity("JeffreyHealthCheck");
+        using var activity = ActivitySource.CreateActivity("JeffreyHealthCheck", ActivityKind.Internal)?.Start();
         activity?.AddEvent(new ActivityEvent(EventName, tags: new ActivityTagsCollection
         {
             ["time minute of day"] = now.Minute,
