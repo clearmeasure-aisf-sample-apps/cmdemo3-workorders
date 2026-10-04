@@ -4,7 +4,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Azure.Monitor.OpenTelemetry.AspNetCore;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
@@ -96,9 +95,9 @@ public static class Extensions
     }
 
     /// <summary>
-    /// Adds OpenTelemetry exporters based on the presence of configuration.
-    /// If the OTEL_EXPORTER_OTLP_ENDPOINT environment variable is set, the OTLP exporter will be used.
-    /// If ApplicationInsights:ConnectionString is configured, the Azure Monitor exporter will be used.
+    /// Adds the OTLP exporter when the OTEL_EXPORTER_OTLP_ENDPOINT environment variable is set. It is the only
+    /// exporter: the service name and other resource attributes come from OTEL_SERVICE_NAME and
+    /// OTEL_RESOURCE_ATTRIBUTES, which the OpenTelemetry SDK reads by default.
     /// </summary>
     private static void AddOpenTelemetryExporters<TBuilder>(this TBuilder builder, OpenTelemetryBuilder otelBuilder) where TBuilder : IHostApplicationBuilder
     {
@@ -107,13 +106,6 @@ public static class Extensions
         if (useOtlpExporter)
         {
             otelBuilder.UseOtlpExporter();
-        }
-
-        var useAzureMonitorExporter = !string.IsNullOrEmpty(builder.Configuration["ApplicationInsights:ConnectionString"]);
-
-        if (useAzureMonitorExporter)
-        {
-            otelBuilder.UseAzureMonitor();
         }
     }
 
