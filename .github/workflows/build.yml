@@ -188,8 +188,10 @@ jobs:
       # Publish code coverage
       - name: Publish Code Coverage
         uses: codecov/codecov-action@v4
+        continue-on-error: true
         if: always()
         with:
+          fail_ci_if_error: false
           files: '**/build/test/**/In/**/coverage.cobertura.xml'
           flags: unittests-linux
           name: codecov-linux
