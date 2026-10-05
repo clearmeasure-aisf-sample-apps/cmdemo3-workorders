@@ -1,0 +1,11 @@
+# Codecov reports coverage and never decides a merge: both of its statuses are informational, so a drop in coverage or
+# an outage of Codecov shows on the pull request without failing it. The upload step of build.yml cannot fail the
+# build either (continue-on-error, fail_ci_if_error: false). The required checks are "Build result" and "secret-scan".
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
