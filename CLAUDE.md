@@ -133,7 +133,7 @@ DbUp scripts in `src/Database/scripts/Update/`, numbered sequentially (`###_Desc
 
 **AppHost** — Aspire.AppHost.Sdk 13.1.2
 
-**ServiceDefaults** — OpenTelemetry.Exporter.OpenTelemetryProtocol 1.12.0, OpenTelemetry.Extensions.Hosting 1.12.0, Microsoft.Extensions.Http.Resilience 9.9.0, Microsoft.Extensions.ServiceDiscovery 9.5.0
+**ServiceDefaults** — Azure.Monitor.OpenTelemetry.AspNetCore 1.6.0, OpenTelemetry.Exporter.OpenTelemetryProtocol 1.12.0, OpenTelemetry.Extensions.Hosting 1.12.0, Microsoft.Extensions.Http.Resilience 9.9.0, Microsoft.Extensions.ServiceDiscovery 9.5.0
 
 **UnitTests** — NUnit 4.3.2, NUnit3TestAdapter 5.0.0, Shouldly 4.3.0, bunit 1.40.0, AutoBogus.Conventions 2.13.1, MediatR 12.4.1, coverlet.msbuild 6.0.4, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
 
@@ -169,6 +169,22 @@ Also available as `/api/v1.0/features/flags`.
 **Helper:** `src/UI/Api/ConditionalGetEtag.cs` — serializes with `JsonSerializerDefaults.Web` and returns `ContentResult`; reuse for any read-only GET that returns JSON.
 
 Pattern: no `IBus`, no query, no handler — pure static data. API-key middleware guards automatically. Rate-limited by `ApiRateLimiting.PolicyName`.
+
+## Telemetry
+
+Exporters (`src/ChurchBulletin.ServiceDefaults/Extensions.cs`): Azure Monitor (Application Insights) when
+`APPLICATIONINSIGHTS_CONNECTION_STRING` is non-empty; OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; both may run.
+
+Live counters for a health dashboard in another origin (`src/UI/Server/LiveTelemetry/`), counted in-process whether
+or not an exporter is configured:
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/_telemetry` | GET | Rolling 60 s counts: requests (Front Door / direct / errors / p95), probes, SQL commands (p95), outgoing HTTP calls. Anonymous, `Access-Control-Allow-Origin: *`, `Cache-Control: no-store` |
+| `/api/work-orders/status-counts` | GET | Work-order count per status through `IBus` → EF Core: representative read traffic. Anonymous, not rate-limited, `no-store` |
+
+Request classes: header `X-FD-HealthProbe: 1` → Front Door probe; `/_*` (except `/_framework`, `/_content`),
+`/health`, `/alive` → probe; otherwise traffic, through Front Door when `X-Azure-FDID` is present.
 
 ## DI and Service Wiring
 

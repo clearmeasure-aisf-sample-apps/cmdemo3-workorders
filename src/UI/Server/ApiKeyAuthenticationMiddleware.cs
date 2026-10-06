@@ -97,6 +97,7 @@ internal static class ApiPublicPathRules
         "tools/word-count",
         "tools/work-order-statuses",
         "tools/due-date-check",
+        "work-orders/status-counts",
         "health",
         "health/detailed"
     };

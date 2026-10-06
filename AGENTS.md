@@ -29,7 +29,6 @@ The `launchSettings.json` contains a Windows-only LocalDB connection string that
 ```bash
 export ConnectionStrings__SqlConnectionString="server=localhost,1433;database=ChurchBulletin;User ID=sa;Password=churchbulletin-mssql#1A;TrustServerCertificate=true;"
 export ASPNETCORE_ENVIRONMENT=Development
-export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=586d68ed-85bc-4092-ac8a-fabb7a583e93;IngestionEndpoint=https://centralus-2.in.applicationinsights.azure.com/;LiveEndpoint=https://centralus.livediagnostics.monitor.azure.com/;ApplicationId=5328e763-3c56-4eae-ad66-aa528a92e984"
 export AI_OpenAI_ApiKey=""
 export AI_OpenAI_Url=""
 export AI_OpenAI_Model=""
@@ -38,7 +37,7 @@ cd src/UI/Server && dotnet run --no-launch-profile --urls "https://localhost:717
 
 Key gotchas:
 - **Must use `--no-launch-profile`** to avoid the LocalDB connection string override from `launchSettings.json`.
-- **Must set `APPLICATIONINSIGHTS_CONNECTION_STRING`** or the Azure Monitor exporter will crash on startup.
+- `APPLICATIONINSIGHTS_CONNECTION_STRING` is optional: when set, telemetry goes to Application Insights through the Azure Monitor exporter; when empty, nothing is exported (the in-process `/_telemetry` counters still work).
 - **Must set `AI_OpenAI_*` vars to empty strings** to prevent the app from trying to connect to Azure OpenAI (it degrades gracefully).
 - The SQL Server Docker container must already be running (created by `PrivateBuild.ps1` or manually via `docker run`). The container name is `churchbulletin-mssql` and the password is `churchbulletin-mssql#1A`.
 

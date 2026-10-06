@@ -8,6 +8,7 @@ using ClearMeasure.Bootcamp.McpServer.Tools;
 using ClearMeasure.Bootcamp.UI.Api;
 using ClearMeasure.Bootcamp.UI.Api.Controllers;
 using ClearMeasure.Bootcamp.UI.Server.Grpc;
+using ClearMeasure.Bootcamp.UI.Server.LiveTelemetry;
 using ClearMeasure.Bootcamp.UI.Server.Middleware;
 using ClearMeasure.Bootcamp.UI.Server.Notifications;
 using ClearMeasure.Bootcamp.UI.Server.RateLimiting;
@@ -81,6 +82,7 @@ public static class ServerApplication
         builder.Services.AddRazorPages();
         builder.Host.UseLamar(registry => { registry.IncludeRegistry<UiServiceRegistry>(); });
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddLiveTelemetry();
         builder.Services.AddScoped<IDistributedBus, DistributedBus>();
         builder.Services.AddMemoryCache();
         builder.Services.Configure<IdempotencyOptions>(
@@ -163,6 +165,7 @@ public static class ServerApplication
         app.UseSerilogShutdown();
         app.MapDefaultEndpoints();
         app.UseMiddleware<HttpRequestMetricsMiddleware>();
+        app.UseMiddleware<LiveTelemetryMiddleware>();
         app.UseCorrelationId();
         app.UseWhen(
             context => ProblemDetailsPaths.IsMachineOriented(context.Request.Path),
@@ -227,6 +230,7 @@ public static class ServerApplication
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
             return Results.Json(new { version });
         }).CacheOutput(OutputCachePolicyNames.VersionMetadata);
+        app.MapLiveTelemetry();
         app.MapHealthChecks("_healthcheck");
         app.MapHealthChecks("_healthcheck/detailed", new HealthCheckOptions
         {
