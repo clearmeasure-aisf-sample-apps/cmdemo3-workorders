@@ -35,7 +35,7 @@ jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       found: ${{ steps.find.outputs.found }}
     steps:
@@ -52,7 +52,7 @@ jobs:
   release:
     needs: packages
     if: needs.packages.outputs.found == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     steps:
       - uses: actions/checkout@v6.0.1
@@ -71,7 +71,7 @@ jobs:
           "version=$major.$minor.${{ github.event.workflow_run.run_number }}" >> $env:GITHUB_OUTPUT
 
       - name: Download the build's packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: churchbulletin-nuget-packages
           path: ./packages
@@ -108,7 +108,7 @@ jobs:
           -BuiltAt '${{ github.event.workflow_run.updated_at }}'
           -OutputPath 'built/build-facts.json'
 
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_ACR_PUSH }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -158,7 +158,7 @@ jobs:
           "Acceptance tests: $([Math]::Round($source.Length / 1MB)) MB -> $([Math]::Round((Get-Item $target).Length / 1MB)) MB" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Push the database and acceptance-test packages
-        uses: OctopusDeploy/push-package-action@v3
+        uses: OctopusDeploy/push-package-action@v4
         with:
           packages: |
             packages/ChurchBulletin.Database.${{ steps.version.outputs.version }}.nupkg
@@ -166,7 +166,7 @@ jobs:
           overwrite_mode: IgnoreIfExists
 
       - name: Create the release
-        uses: OctopusDeploy/create-release-action@v3
+        uses: OctopusDeploy/create-release-action@v4
         with:
           project: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}
           release_number: ${{ steps.version.outputs.version }}
