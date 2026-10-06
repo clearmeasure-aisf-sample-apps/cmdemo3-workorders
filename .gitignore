@@ -354,6 +354,8 @@ MigrationBackup/
 .ionide/
 /build/test
 coverage.cobertura.xml
+# Written by scripts/Write-BuildFacts.ps1; the Release workflow stamps it into the package.
+build-facts.json
 /src/.idea/.idea.ChurchBulletin/.idea
 /src/AcceptanceTests/coverage.json
 /src/IntegrationTests/coverage.json

@@ -180,11 +180,31 @@ or not an exporter is configured:
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/_telemetry` | GET | Rolling 60 s counts: requests (Front Door / direct / errors / p95), probes, SQL commands (p95), outgoing HTTP calls. Anonymous, `Access-Control-Allow-Origin: *`, `Cache-Control: no-store` |
+| `/_telemetry` | GET | Rolling 60 s counts: requests (Front Door / direct / errors / p95), probes, SQL commands (during requests / background / p95), outgoing HTTP calls; and `process`: the vitals of the process. Anonymous, `Access-Control-Allow-Origin: *`, `Cache-Control: no-store` |
+| `/_build` | GET | Facts about the build the environment runs (`src/UI/Server/BuildFacts/`). Anonymous, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=300` |
 | `/api/work-orders/status-counts` | GET | Work-order count per status through `IBus` → EF Core: representative read traffic. Anonymous, not rate-limited, `no-store` |
 
 Request classes: header `X-FD-HealthProbe: 1` → Front Door probe; `/_*` (except `/_framework`, `/_content`),
 `/health`, `/alive` → probe; otherwise traffic, through Front Door when `X-Azure-FDID` is present.
+
+`sql` of `/_telemetry`: `perMinute` = `requests` (commands executed while an HTTP request was being handled, traffic
+or probe: the flow `LiveTelemetryMiddleware` marks with `RequestFlow`) + `background` (the process's own: NServiceBus
+SQL-transport polling, hosted services); `p95Ms` covers both.
+
+`process` of `/_telemetry`: `cpuPercent` (share of all processors over the last sampling interval: at least 2 s,
+sampled when a request completes or the endpoint is read, never per request), `workingSetMb`, `gcHeapMb`, `threads`
+(thread pool), `inFlight` (requests executing, the reading one included), `exceptionsPerMinute` (requests that ended
+in an unhandled exception: escaped the pipeline, or answered by the exception handler; not first-chance exceptions)
+and `uptimeSeconds` (since `startedAt`).
+
+`/_build` answers `build-facts.json` of the content root: `version`, `commit`, `commitUrl`, `builtAt`, `buildUrl`,
+`code` (lines of code per language), `tests`, `coverage`, `complexity`, `crap`, `analysis`; any of them null when the
+build could not tell. `scripts/Write-BuildFacts.ps1` writes the file and the Release workflow stamps it into the
+image's files (step "Stamp the build facts into the image's files": `built/build-facts.json`, which the `Dockerfile`
+copies to `/app`, the content root): the code from the checkout
+(`git ls-files`, non-blank lines), the rest from the Build run's artifacts (`test-results-linux`,
+`test-results-acceptance`, `code-coverage-linux`, `crap-metrics-linux`, `qodana-report`). Without the file (a local
+run) the answer has the version of the assembly and nulls. Locally: `pwsh -NoProfile -File scripts/Write-BuildFacts.ps1`.
 
 ## DI and Service Wiring
 

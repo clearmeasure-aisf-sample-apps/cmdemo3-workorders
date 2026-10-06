@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using ClearMeasure.Bootcamp.UI.Server.LiveTelemetry;
+using Microsoft.AspNetCore.Http;
 using OpenTelemetry;
 using Shouldly;
 
@@ -26,7 +27,54 @@ public class DependencyCallListenerTests
             DependencyCallListener.SqlCommandAfter,
             SqlPayload(operationId, started + Stopwatch.Frequency * 12 / 1000));
 
-        counters.Snapshot().Sql.ShouldBe(new SqlCounts(1, 12));
+        counters.Snapshot().Sql.ShouldBe(new SqlCounts(1, 0, 1, 12));
+    }
+
+    [Test]
+    public void OnSqlClientEvent_WhenCommandStartsInARequestFlow_ShouldCountItForRequests()
+    {
+        var counters = new LiveTelemetryCounters(new StubTimeProvider(Start));
+        using var listener = new DependencyCallListener(counters);
+        var inRequest = Guid.NewGuid();
+        var inBackground = Guid.NewGuid();
+
+        listener.OnSqlClientEvent(DependencyCallListener.SqlCommandBefore, SqlPayload(inBackground, 1));
+        var flow = RequestFlow.Begin();
+        listener.OnSqlClientEvent(DependencyCallListener.SqlCommandBefore, SqlPayload(inRequest, 1));
+        listener.OnSqlClientEvent(DependencyCallListener.SqlCommandAfter, SqlPayload(inBackground, 2));
+        flow.End();
+        listener.OnSqlClientEvent(DependencyCallListener.SqlCommandAfter, SqlPayload(inRequest, 2));
+
+        counters.Snapshot().Sql.ShouldBe(new SqlCounts(2, 1, 1, 0));
+    }
+
+    [Test]
+    public async Task OnSqlClientEvent_WhenCommandsRunInsideAndOutsideARequest_ShouldSplitThem()
+    {
+        var clock = new StubTimeProvider(Start);
+        var counters = new LiveTelemetryCounters(clock);
+        using var listener = new DependencyCallListener(counters);
+        Action<string, object?> writeSqlClientEvent = listener.OnSqlClientEvent;
+        var middleware = new LiveTelemetryMiddleware(
+            async _ =>
+            {
+                await Task.Yield();
+                ExecuteSqlCommand(writeSqlClientEvent);
+                await Task.Run(() => ExecuteSqlCommand(writeSqlClientEvent));
+            },
+            counters,
+            clock);
+
+        ExecuteSqlCommand(writeSqlClientEvent);
+        await middleware.InvokeAsync(new DefaultHttpContext { Request = { Path = "/_healthcheck" } });
+        await middleware.InvokeAsync(new DefaultHttpContext { Request = { Path = "/api/work-orders/status-counts" } });
+        await Task.Run(() => ExecuteSqlCommand(writeSqlClientEvent));
+        ExecuteSqlCommand(writeSqlClientEvent);
+
+        var sql = counters.Snapshot().Sql;
+        sql.Requests.ShouldBe(4);
+        sql.Background.ShouldBe(3);
+        sql.PerMinute.ShouldBe(7);
     }
 
     [Test]
@@ -149,6 +197,14 @@ public class DependencyCallListenerTests
         using var socket = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
         socket.Start();
         return ((System.Net.IPEndPoint)socket.LocalEndpoint).Port;
+    }
+
+    // What SqlClient writes around one command, on the flow that executes it.
+    private static void ExecuteSqlCommand(Action<string, object?> writeSqlClientEvent)
+    {
+        var operationId = Guid.NewGuid();
+        writeSqlClientEvent(DependencyCallListener.SqlCommandBefore, SqlPayload(operationId, 1));
+        writeSqlClientEvent(DependencyCallListener.SqlCommandAfter, SqlPayload(operationId, 2));
     }
 
     private static List<KeyValuePair<string, object>> SqlPayload(Guid operationId, long timestamp) =>

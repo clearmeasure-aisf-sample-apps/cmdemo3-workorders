@@ -92,6 +92,22 @@ jobs:
           Get-ChildItem -Path ./built -Include '*.nuspec', '[Content_Types].xml', '*.psmdcp' -Recurse | Remove-Item -Force
           Remove-Item -Path ./built/_rels, ./built/package -Recurse -Force -ErrorAction SilentlyContinue
 
+      # The build facts the app serves at /_build (CAP-079): written into the folder the image is built from, so the
+      # image carries them at its content root (/app/build-facts.json). The repository's own script writes them: the
+      # code from this checkout; tests, coverage, complexity, CRAP and Qodana from the artifacts of the Build run,
+      # each null when its artifact is not there. A repository without the script skips the step.
+      - name: Stamp the build facts into the image's files
+        if: hashFiles('scripts/Write-BuildFacts.ps1') != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          ./scripts/Write-BuildFacts.ps1 -DownloadArtifacts
+          -Version '${{ steps.version.outputs.version }}'
+          -RunId '${{ github.event.workflow_run.id }}'
+          -BuiltAt '${{ github.event.workflow_run.updated_at }}'
+          -OutputPath 'built/build-facts.json'
+
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_ACR_PUSH }}
