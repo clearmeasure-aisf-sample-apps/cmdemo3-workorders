@@ -32,13 +32,36 @@ public class LiveTelemetryEndpointWebTests
         using var document = JsonDocument.Parse(await client.GetStringAsync("/_telemetry"));
 
         var root = document.RootElement;
-        PropertyNames(root).ShouldBe(["windowSeconds", "startedAt", "requests", "probes", "sql", "http"]);
+        PropertyNames(root).ShouldBe(["windowSeconds", "startedAt", "requests", "probes", "sql", "http", "process"]);
         root.GetProperty("windowSeconds").GetInt32().ShouldBe(60);
         root.GetProperty("startedAt").GetString()!.ShouldMatch(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$");
         PropertyNames(root.GetProperty("requests")).ShouldBe(["perMinute", "frontDoor", "direct", "errors", "p95Ms"]);
         PropertyNames(root.GetProperty("probes")).ShouldBe(["perMinute", "frontDoor"]);
-        PropertyNames(root.GetProperty("sql")).ShouldBe(["perMinute", "p95Ms"]);
+        PropertyNames(root.GetProperty("sql")).ShouldBe(["perMinute", "requests", "background", "p95Ms"]);
         PropertyNames(root.GetProperty("http")).ShouldBe(["perMinute"]);
+        PropertyNames(root.GetProperty("process")).ShouldBe(
+        [
+            "cpuPercent", "workingSetMb", "gcHeapMb", "threads", "inFlight", "exceptionsPerMinute", "uptimeSeconds"
+        ]);
+    }
+
+    [Test]
+    public async Task GetTelemetry_WhenCalled_ShouldReportTheVitalsOfTheServerProcess()
+    {
+        await using var factory = new ApiVersioningRoutingWebApplicationFactory();
+        using var client = factory.CreateClient();
+        (await client.GetAsync("/api/ping")).Dispose();
+
+        using var document = JsonDocument.Parse(await client.GetStringAsync("/_telemetry"));
+
+        var process = document.RootElement.GetProperty("process");
+        process.GetProperty("cpuPercent").GetDouble().ShouldBeInRange(0, 100);
+        process.GetProperty("workingSetMb").GetInt64().ShouldBeGreaterThan(0);
+        process.GetProperty("gcHeapMb").GetInt64().ShouldBeGreaterThan(0);
+        process.GetProperty("threads").GetInt32().ShouldBeGreaterThan(0);
+        process.GetProperty("inFlight").GetInt32().ShouldBe(1);
+        process.GetProperty("exceptionsPerMinute").GetInt32().ShouldBe(0);
+        process.GetProperty("uptimeSeconds").GetInt64().ShouldBeInRange(0, 600);
     }
 
     [Test]

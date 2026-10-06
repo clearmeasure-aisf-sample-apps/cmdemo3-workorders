@@ -2,8 +2,9 @@ namespace ClearMeasure.Bootcamp.UI.Server.LiveTelemetry;
 
 /// <summary>
 /// In-process counters over a rolling one-minute window: sixty one-second buckets of counts, and the latest
-/// latency samples for percentiles. Thread-safe; recording allocates nothing. Time comes from
-/// <see cref="TimeProvider"/>, so the window can be driven in tests.
+/// latency samples for percentiles; and the vitals of the process (CPU, memory, threads, requests executing).
+/// Thread-safe; recording allocates nothing. Time comes from <see cref="TimeProvider"/>, so the window and the
+/// CPU sampling can be driven in tests.
 /// </summary>
 public sealed class LiveTelemetryCounters
 {
@@ -13,26 +14,58 @@ public sealed class LiveTelemetryCounters
     /// <summary>Latency samples kept per series; beyond this many in a minute the percentile uses the latest ones.</summary>
     internal const int LatencySampleCapacity = 4096;
 
+    /// <summary>
+    /// Shortest interval CPU use is measured over. A sample is taken when a request completes or the counts are
+    /// read and the previous sample is at least this old: never on a timer, and not on every request.
+    /// </summary>
+    internal const int CpuSampleSeconds = 2;
+
     private const long WindowMilliseconds = WindowSeconds * 1000L;
+    private const double BytesPerMegabyte = 1024 * 1024;
 
     private readonly TimeProvider _timeProvider;
+    private readonly IProcessMeter _processMeter;
     private readonly DateTime _startedAt;
+    private readonly long _startedSecond;
     private readonly Lock _gate = new();
     private readonly long[] _bucketSecond = new long[WindowSeconds];
     private readonly int[] _counts = new int[WindowSeconds * Counter.Count];
     private readonly LatencySamples _requestLatency = new(LatencySampleCapacity);
     private readonly LatencySamples _sqlLatency = new(LatencySampleCapacity);
+    private readonly CpuUsage _cpu;
+    private int _inFlight;
 
     /// <summary>
-    /// Starts counting at the current time of <paramref name="timeProvider"/>.
+    /// Starts counting at the current time of <paramref name="timeProvider"/>, for the current process.
     /// </summary>
-    public LiveTelemetryCounters(TimeProvider timeProvider)
+    public LiveTelemetryCounters(TimeProvider timeProvider) : this(timeProvider, new SystemProcessMeter())
+    {
+    }
+
+    /// <summary>
+    /// Starts counting at the current time of <paramref name="timeProvider"/>, with the process figures of
+    /// <paramref name="processMeter"/>.
+    /// </summary>
+    internal LiveTelemetryCounters(TimeProvider timeProvider, IProcessMeter processMeter)
     {
         _timeProvider = timeProvider;
+        _processMeter = processMeter;
         Array.Fill(_bucketSecond, long.MinValue);
         var now = timeProvider.GetUtcNow().UtcTicks;
         _startedAt = new DateTime(now - now % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        _startedSecond = NowMilliseconds() / 1000;
+        _cpu = new CpuUsage(NowMilliseconds(), processMeter.CpuTime, processMeter.ProcessorCount);
     }
+
+    /// <summary>
+    /// Counts a request as executing, until <see cref="RequestEnded"/>.
+    /// </summary>
+    public void RequestStarted() => Interlocked.Increment(ref _inFlight);
+
+    /// <summary>
+    /// Stops counting a request as executing.
+    /// </summary>
+    public void RequestEnded() => Interlocked.Decrement(ref _inFlight);
 
     /// <summary>
     /// Records a completed incoming request. Traffic durations feed the request percentile; pass null for
@@ -43,6 +76,7 @@ public sealed class LiveTelemetryCounters
         var nowMs = NowMilliseconds();
         lock (_gate)
         {
+            SampleCpuWhenDue(nowMs);
             switch (kind)
             {
                 case RequestKind.FrontDoorProbe:
@@ -71,13 +105,21 @@ public sealed class LiveTelemetryCounters
         }
     }
 
-    /// <summary>Records a completed SQL command and its duration.</summary>
-    public void RecordSqlCommand(TimeSpan elapsed)
+    /// <summary>
+    /// Records a completed SQL command and its duration. <paramref name="duringRequest"/> tells a command executed
+    /// while an HTTP request was being handled (traffic or probe) from one the process executed on its own.
+    /// </summary>
+    public void RecordSqlCommand(TimeSpan elapsed, bool duringRequest)
     {
         var nowMs = NowMilliseconds();
         lock (_gate)
         {
             Increment(nowMs, Counter.SqlCommands);
+            if (duringRequest)
+            {
+                Increment(nowMs, Counter.SqlCommandsDuringRequests);
+            }
+
             _sqlLatency.Add(nowMs, ToWholeMilliseconds(elapsed));
         }
     }
@@ -92,7 +134,21 @@ public sealed class LiveTelemetryCounters
         }
     }
 
-    /// <summary>Returns the counts of the last 60 seconds.</summary>
+    /// <summary>
+    /// Records a request that ended in an unhandled exception: one that escaped the pipeline, or one the
+    /// exception handler turned into an error response. Traffic and probes alike; a request its client aborted
+    /// is not one.
+    /// </summary>
+    public void RecordUnhandledException()
+    {
+        var nowMs = NowMilliseconds();
+        lock (_gate)
+        {
+            Increment(nowMs, Counter.UnhandledExceptions);
+        }
+    }
+
+    /// <summary>Returns the counts of the last 60 seconds and the vitals of the process now.</summary>
     public LiveTelemetrySnapshot Snapshot()
     {
         var nowMs = NowMilliseconds();
@@ -100,8 +156,11 @@ public sealed class LiveTelemetryCounters
         Span<int> totals = stackalloc int[Counter.Count];
         int? requestP95;
         int? sqlP95;
+        double cpuPercent;
         lock (_gate)
         {
+            SampleCpuWhenDue(nowMs);
+            cpuPercent = _cpu.Percent;
             for (var bucket = 0; bucket < WindowSeconds; bucket++)
             {
                 var second = _bucketSecond[bucket];
@@ -127,11 +186,32 @@ public sealed class LiveTelemetryCounters
             _startedAt,
             new RequestCounts(frontDoor + direct, frontDoor, direct, totals[Counter.TrafficErrors], requestP95),
             new ProbeCounts(totals[Counter.Probes], totals[Counter.FrontDoorProbes]),
-            new SqlCounts(totals[Counter.SqlCommands], sqlP95),
-            new HttpClientCounts(totals[Counter.HttpClientCalls]));
+            new SqlCounts(
+                totals[Counter.SqlCommands],
+                totals[Counter.SqlCommandsDuringRequests],
+                totals[Counter.SqlCommands] - totals[Counter.SqlCommandsDuringRequests],
+                sqlP95),
+            new HttpClientCounts(totals[Counter.HttpClientCalls]),
+            new ProcessVitals(
+                cpuPercent,
+                ToWholeMegabytes(_processMeter.WorkingSetBytes),
+                ToWholeMegabytes(_processMeter.GcHeapBytes),
+                _processMeter.ThreadPoolThreads,
+                Volatile.Read(ref _inFlight),
+                totals[Counter.UnhandledExceptions],
+                Math.Max(0, nowSecond - _startedSecond)));
     }
 
     private long NowMilliseconds() => _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+
+    // The lock is held. Reading the processor time is one system call, made at most once per sampling interval.
+    private void SampleCpuWhenDue(long nowMs)
+    {
+        if (_cpu.IsDue(nowMs))
+        {
+            _cpu.Sample(nowMs, _processMeter.CpuTime);
+        }
+    }
 
     private void Increment(long nowMs, int counter)
     {
@@ -149,6 +229,9 @@ public sealed class LiveTelemetryCounters
     private static int ToWholeMilliseconds(TimeSpan elapsed) =>
         (int)Math.Clamp(Math.Round(elapsed.TotalMilliseconds, MidpointRounding.AwayFromZero), 0, int.MaxValue);
 
+    private static long ToWholeMegabytes(long bytes) =>
+        (long)Math.Round(bytes / BytesPerMegabyte, MidpointRounding.AwayFromZero);
+
     private static class Counter
     {
         public const int FrontDoorTraffic = 0;
@@ -158,7 +241,42 @@ public sealed class LiveTelemetryCounters
         public const int FrontDoorProbes = 4;
         public const int SqlCommands = 5;
         public const int HttpClientCalls = 6;
-        public const int Count = 7;
+        public const int UnhandledExceptions = 7;
+        public const int SqlCommandsDuringRequests = 8;
+        public const int Count = 9;
+    }
+
+    /// <summary>
+    /// CPU use between two samples as a percentage of all processors available to the process; not thread-safe
+    /// on its own (the owner holds the lock). Zero until the first interval has passed.
+    /// </summary>
+    private sealed class CpuUsage(long startedMs, TimeSpan cpuTime, int processorCount)
+    {
+        private const long SampleMilliseconds = CpuSampleSeconds * 1000L;
+
+        private readonly int _processorCount = Math.Max(1, processorCount);
+        private long _sampledAtMs = startedMs;
+        private TimeSpan _cpuTime = cpuTime;
+
+        /// <summary>Percentage over the last sampled interval: 0 to 100, one decimal.</summary>
+        public double Percent { get; private set; }
+
+        /// <summary>True when the previous sample is a full interval old, or the clock went back.</summary>
+        public bool IsDue(long nowMs) => nowMs < _sampledAtMs || nowMs - _sampledAtMs >= SampleMilliseconds;
+
+        public void Sample(long nowMs, TimeSpan cpuTime)
+        {
+            var wallMs = nowMs - _sampledAtMs;
+            if (wallMs > 0)
+            {
+                var usedMs = (cpuTime - _cpuTime).TotalMilliseconds;
+                var percent = 100.0 * usedMs / (wallMs * (double)_processorCount);
+                Percent = Math.Round(Math.Clamp(percent, 0, 100), 1, MidpointRounding.AwayFromZero);
+            }
+
+            _sampledAtMs = nowMs;
+            _cpuTime = cpuTime;
+        }
     }
 
     /// <summary>

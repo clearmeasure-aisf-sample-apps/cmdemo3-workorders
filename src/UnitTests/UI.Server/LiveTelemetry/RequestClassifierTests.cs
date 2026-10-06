@@ -21,6 +21,7 @@ public class RequestClassifierTests
     [TestCase("/_healthcheck/detailed")]
     [TestCase("/_version")]
     [TestCase("/_telemetry")]
+    [TestCase("/_build")]
     [TestCase("/_lamar/services")]
     [TestCase("/health")]
     [TestCase("/HEALTH")]

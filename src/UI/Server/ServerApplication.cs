@@ -7,6 +7,7 @@ using ClearMeasure.Bootcamp.McpServer.Resources;
 using ClearMeasure.Bootcamp.McpServer.Tools;
 using ClearMeasure.Bootcamp.UI.Api;
 using ClearMeasure.Bootcamp.UI.Api.Controllers;
+using ClearMeasure.Bootcamp.UI.Server.BuildFacts;
 using ClearMeasure.Bootcamp.UI.Server.Grpc;
 using ClearMeasure.Bootcamp.UI.Server.LiveTelemetry;
 using ClearMeasure.Bootcamp.UI.Server.Middleware;
@@ -83,6 +84,7 @@ public static class ServerApplication
         builder.Host.UseLamar(registry => { registry.IncludeRegistry<UiServiceRegistry>(); });
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddLiveTelemetry();
+        builder.Services.AddBuildFacts();
         builder.Services.AddScoped<IDistributedBus, DistributedBus>();
         builder.Services.AddMemoryCache();
         builder.Services.Configure<IdempotencyOptions>(
@@ -231,6 +233,7 @@ public static class ServerApplication
             return Results.Json(new { version });
         }).CacheOutput(OutputCachePolicyNames.VersionMetadata);
         app.MapLiveTelemetry();
+        app.MapBuildFacts();
         app.MapHealthChecks("_healthcheck");
         app.MapHealthChecks("_healthcheck/detailed", new HealthCheckOptions
         {

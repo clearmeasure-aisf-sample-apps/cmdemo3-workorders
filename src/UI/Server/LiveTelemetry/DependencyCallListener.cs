@@ -6,8 +6,8 @@ namespace ClearMeasure.Bootcamp.UI.Server.LiveTelemetry;
 
 /// <summary>
 /// Feeds <see cref="LiveTelemetryCounters"/> with the process's outgoing calls, whether or not a telemetry
-/// exporter is configured: SQL commands from Microsoft.Data.SqlClient's diagnostic events (every command, whatever
-/// caused it), and outgoing HTTP calls from the runtime's <c>System.Net.Http</c> meter. HTTP calls that export
+/// exporter is configured: SQL commands from Microsoft.Data.SqlClient's diagnostic events (every command, and
+/// whether it started in the flow of an HTTP request: <see cref="RequestFlow"/>), and outgoing HTTP calls from the runtime's <c>System.Net.Http</c> meter. HTTP calls that export
 /// telemetry (run under OpenTelemetry's suppression scope, or sent to Azure Monitor ingestion) are not counted.
 /// </summary>
 public sealed class DependencyCallListener(LiveTelemetryCounters counters) :
@@ -31,7 +31,7 @@ public sealed class DependencyCallListener(LiveTelemetryCounters counters) :
         "dc.services.visualstudio.com"
     ];
 
-    private readonly ConcurrentDictionary<Guid, long> _sqlCommandsInFlight = new();
+    private readonly ConcurrentDictionary<Guid, SqlCommandStart> _sqlCommandsInFlight = new();
     private readonly Lock _subscriptionGate = new();
     private readonly List<IDisposable> _subscriptions = [];
     private MeterListener? _meterListener;
@@ -125,7 +125,9 @@ public sealed class DependencyCallListener(LiveTelemetryCounters counters) :
     /// <summary>
     /// Pairs SqlClient's before and after/error events by operation ID and records the command's duration.
     /// The payloads expose their fields as key/value pairs (<c>OperationId</c>, <c>Timestamp</c> in
-    /// <see cref="Stopwatch"/> ticks).
+    /// <see cref="Stopwatch"/> ticks). SqlClient writes the before event on the flow that executes the command,
+    /// so that is where the command is attributed to a request or to the process itself; the after event may
+    /// arrive on another flow.
     /// </summary>
     internal void OnSqlClientEvent(string name, object? payload)
     {
@@ -137,13 +139,14 @@ public sealed class DependencyCallListener(LiveTelemetryCounters counters) :
         switch (name)
         {
             case SqlCommandBefore:
-                _sqlCommandsInFlight[operationId] = timestamp;
+                _sqlCommandsInFlight[operationId] = new SqlCommandStart(timestamp, RequestFlow.IsActive);
                 break;
             case SqlCommandAfter:
             case SqlCommandError:
                 if (_sqlCommandsInFlight.TryRemove(operationId, out var started))
                 {
-                    counters.RecordSqlCommand(Stopwatch.GetElapsedTime(started, timestamp));
+                    counters.RecordSqlCommand(
+                        Stopwatch.GetElapsedTime(started.Timestamp, timestamp), started.DuringRequest);
                 }
 
                 break;
@@ -190,6 +193,8 @@ public sealed class DependencyCallListener(LiveTelemetryCounters counters) :
 
     private static bool IsSqlCommandEvent(string name) =>
         name is SqlCommandBefore or SqlCommandAfter or SqlCommandError;
+
+    private readonly record struct SqlCommandStart(long Timestamp, bool DuringRequest);
 
     private static bool TryReadOperation(object? payload, out Guid operationId, out long timestamp)
     {

@@ -19,7 +19,7 @@ public class LiveTelemetryCountersTests
         snapshot.StartedAt.ShouldBe(new DateTime(2026, 10, 5, 23, 0, 0, DateTimeKind.Utc));
         snapshot.Requests.ShouldBe(new RequestCounts(0, 0, 0, 0, null));
         snapshot.Probes.ShouldBe(new ProbeCounts(0, 0));
-        snapshot.Sql.ShouldBe(new SqlCounts(0, null));
+        snapshot.Sql.ShouldBe(new SqlCounts(0, 0, 0, null));
         snapshot.Http.ShouldBe(new HttpClientCounts(0));
     }
 
@@ -36,7 +36,7 @@ public class LiveTelemetryCountersTests
         counters.RecordRequest(RequestKind.Probe, 500, TimeSpan.FromMilliseconds(10));
         counters.RecordRequest(RequestKind.FrontDoorProbe, 200, TimeSpan.FromMilliseconds(10));
         counters.RecordRequest(RequestKind.FrontDoorProbe, 200, TimeSpan.FromMilliseconds(10));
-        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(3));
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(3), false);
         counters.RecordHttpClientCall();
 
         var snapshot = counters.Snapshot();
@@ -48,7 +48,7 @@ public class LiveTelemetryCountersTests
         snapshot.Requests.P95Ms.ShouldBe(10);
         snapshot.Probes.PerMinute.ShouldBe(1);
         snapshot.Probes.FrontDoor.ShouldBe(2);
-        snapshot.Sql.ShouldBe(new SqlCounts(1, 3));
+        snapshot.Sql.ShouldBe(new SqlCounts(1, 0, 1, 3));
         snapshot.Http.ShouldBe(new HttpClientCounts(1));
     }
 
@@ -69,10 +69,10 @@ public class LiveTelemetryCountersTests
         var clock = new StubTimeProvider(Start);
         var counters = new LiveTelemetryCounters(clock);
         counters.RecordRequest(RequestKind.DirectTraffic, 200, TimeSpan.FromMilliseconds(100));
-        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(100));
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(100), false);
         clock.Advance(TimeSpan.FromSeconds(30));
         counters.RecordRequest(RequestKind.DirectTraffic, 200, TimeSpan.FromMilliseconds(20));
-        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(20));
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(20), false);
 
         clock.Advance(TimeSpan.FromSeconds(29));
         var beforeRoll = counters.Snapshot();
@@ -85,9 +85,9 @@ public class LiveTelemetryCountersTests
         beforeRoll.Requests.P95Ms.ShouldBe(100);
         afterFirstRoll.Requests.PerMinute.ShouldBe(1);
         afterFirstRoll.Requests.P95Ms.ShouldBe(20);
-        afterFirstRoll.Sql.ShouldBe(new SqlCounts(1, 20));
+        afterFirstRoll.Sql.ShouldBe(new SqlCounts(1, 0, 1, 20));
         afterSecondRoll.Requests.ShouldBe(new RequestCounts(0, 0, 0, 0, null));
-        afterSecondRoll.Sql.ShouldBe(new SqlCounts(0, null));
+        afterSecondRoll.Sql.ShouldBe(new SqlCounts(0, 0, 0, null));
     }
 
     [Test]
@@ -130,7 +130,7 @@ public class LiveTelemetryCountersTests
         foreach (var ms in Enumerable.Range(1, 20).Reverse())
         {
             counters.RecordRequest(RequestKind.DirectTraffic, 200, TimeSpan.FromMilliseconds(ms));
-            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(ms * 10));
+            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(ms * 10), false);
         }
 
         var snapshot = counters.Snapshot();
@@ -161,15 +161,51 @@ public class LiveTelemetryCountersTests
 
         for (var i = 0; i < LiveTelemetryCounters.LatencySampleCapacity; i++)
         {
-            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(500));
+            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(500), false);
         }
 
         for (var i = 0; i < LiveTelemetryCounters.LatencySampleCapacity; i++)
         {
-            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(2));
+            counters.RecordSqlCommand(TimeSpan.FromMilliseconds(2), false);
         }
 
-        counters.Snapshot().Sql.ShouldBe(new SqlCounts(2 * LiveTelemetryCounters.LatencySampleCapacity, 2));
+        const int commands = 2 * LiveTelemetryCounters.LatencySampleCapacity;
+        counters.Snapshot().Sql.ShouldBe(new SqlCounts(commands, 0, commands, 2));
+    }
+
+    [Test]
+    public void RecordSqlCommand_WhenSomeRanDuringRequests_ShouldCountThemApartFromTheBackground()
+    {
+        var counters = new LiveTelemetryCounters(new StubTimeProvider(Start));
+
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(4), true);
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(6), true);
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(40), false);
+
+        var sql = counters.Snapshot().Sql;
+        sql.PerMinute.ShouldBe(3);
+        sql.Requests.ShouldBe(2);
+        sql.Background.ShouldBe(1);
+        sql.P95Ms.ShouldBe(40);
+    }
+
+    [Test]
+    public void RecordSqlCommand_WhenWindowRolls_ShouldDropBothKindsOlderThanSixtySeconds()
+    {
+        var clock = new StubTimeProvider(Start);
+        var counters = new LiveTelemetryCounters(clock);
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(5), true);
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(5), false);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        counters.RecordSqlCommand(TimeSpan.FromMilliseconds(7), true);
+
+        clock.Advance(TimeSpan.FromSeconds(29));
+        var beforeRoll = counters.Snapshot().Sql;
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var afterRoll = counters.Snapshot().Sql;
+
+        beforeRoll.ShouldBe(new SqlCounts(3, 2, 1, 7));
+        afterRoll.ShouldBe(new SqlCounts(1, 1, 0, 7));
     }
 
     [Test]
@@ -182,7 +218,7 @@ public class LiveTelemetryCountersTests
             for (var i = 0; i < 1000; i++)
             {
                 counters.RecordRequest(RequestKind.DirectTraffic, 200, TimeSpan.FromMilliseconds(1));
-                counters.RecordSqlCommand(TimeSpan.FromMilliseconds(1));
+                counters.RecordSqlCommand(TimeSpan.FromMilliseconds(1), false);
                 counters.RecordHttpClientCall();
             }
         })));
