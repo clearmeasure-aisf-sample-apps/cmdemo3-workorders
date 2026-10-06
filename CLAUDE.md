@@ -117,13 +117,13 @@ DbUp scripts in `src/Database/scripts/Update/`, numbered sequentially (`###_Desc
 
 **Database** — DbUp 5.0.41, dbup-sqlserver 6.0.16, Spectre.Console 0.54.0, Spectre.Console.Cli 0.53.0
 
-**UI.Server** — Lamar.Microsoft.DependencyInjection 15.0.1, Azure.Monitor.OpenTelemetry.AspNetCore 1.3.0, Microsoft.ApplicationInsights.AspNetCore 2.23.0, Microsoft.AspNetCore.Components.WebAssembly.Server 10.0.0, ModelContextProtocol 1.0.0, ModelContextProtocol.AspNetCore 1.0.0, NServiceBus.Extensions.Hosting 3.0.1, OpenTelemetry 1.12.0
+**UI.Server** — Lamar.Microsoft.DependencyInjection 15.0.1, Microsoft.AspNetCore.Components.WebAssembly.Server 10.0.0, ModelContextProtocol 1.0.0, ModelContextProtocol.AspNetCore 1.0.0, NServiceBus.Extensions.Hosting 3.0.1, OpenTelemetry 1.12.0
 
-**UI.Client** — BlazorApplicationInsights 3.2.1, BlazorMvc 2.1.1, MediatR 12.4.1, Lamar.Microsoft.DependencyInjection 15.0.1, Microsoft.AspNetCore.Components.WebAssembly 10.0.0, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
+**UI.Client** — BlazorMvc 2.1.1, MediatR 12.4.1, Lamar.Microsoft.DependencyInjection 15.0.1, Microsoft.AspNetCore.Components.WebAssembly 10.0.0, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
 
 **UI.Api** — Lamar.Microsoft.DependencyInjection 15.0.1
 
-**UI.Shared** — BlazorApplicationInsights 3.2.1, BlazorMvc 2.1.1, MediatR 12.4.1, Microsoft.ApplicationInsights 2.23.0, Microsoft.AspNetCore.Components.Authorization 10.0.0, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
+**UI.Shared** — BlazorMvc 2.1.1, MediatR 12.4.1, Microsoft.AspNetCore.Components.Authorization 10.0.0, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
 
 **LlmGateway** — Azure.AI.OpenAI 2.1.0, MediatR 12.4.1, Microsoft.Extensions.AI 9.7.0, Microsoft.Extensions.AI.OpenAI 9.7.1-preview.1.25365.4, Microsoft.Extensions.AI.Abstractions 9.7.1
 
@@ -133,7 +133,7 @@ DbUp scripts in `src/Database/scripts/Update/`, numbered sequentially (`###_Desc
 
 **AppHost** — Aspire.AppHost.Sdk 13.1.2
 
-**ServiceDefaults** — Azure.Monitor.OpenTelemetry.AspNetCore 1.3.0, OpenTelemetry.Exporter.OpenTelemetryProtocol 1.12.0, OpenTelemetry.Extensions.Hosting 1.12.0, Microsoft.Extensions.Http.Resilience 9.9.0, Microsoft.Extensions.ServiceDiscovery 9.5.0
+**ServiceDefaults** — OpenTelemetry.Exporter.OpenTelemetryProtocol 1.12.0, OpenTelemetry.Extensions.Hosting 1.12.0, Microsoft.Extensions.Http.Resilience 9.9.0, Microsoft.Extensions.ServiceDiscovery 9.5.0
 
 **UnitTests** — NUnit 4.3.2, NUnit3TestAdapter 5.0.0, Shouldly 4.3.0, bunit 1.40.0, AutoBogus.Conventions 2.13.1, MediatR 12.4.1, coverlet.msbuild 6.0.4, Toolbelt.Blazor.SpeechRecognition 1.0.0, Toolbelt.Blazor.SpeechSynthesis 11.0.0
 
