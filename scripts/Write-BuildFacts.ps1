@@ -15,7 +15,8 @@
     coverage    Cobertura files of artifact code-coverage-linux (unit and integration runs, merged per line)
     complexity  the complexity attribute coverlet writes on every method of those Cobertura files
     crap        artifact crap-metrics-linux (scripts/crap: crap-by-file.json, crap-production-violations.json)
-    analysis    qodana.sarif.json of artifact qodana-report: results that are new or unchanged against the baseline
+    analysis    qodana.sarif.json of artifact qodana-report (the artifact holds it inside qodana-report.zip): results
+                that are new or unchanged against the baseline
 
   Every section is optional: an artifact that is missing, expired or unreadable makes its section null and the
   script goes on. Only a package that cannot be stamped fails it.
@@ -367,6 +368,40 @@ function Read-JsonFile {
     return Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json -AsHashtable -Depth 100
 }
 
+# The same file when the artifact holds it inside a zip: the Qodana action uploads its results directory as one
+# archive (qodana-report.zip: the SARIF, the HTML report and the logs, hundreds of megabytes expanded). Only the
+# one entry is read from the archive; nothing is expanded to disk.
+function Read-JsonFileInArchive {
+    param([string]$Directory, [string]$Name)
+
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $archives = Get-ChildItem -LiteralPath $Directory -Recurse -File -Filter '*.zip' |
+        Sort-Object -Property @{ Expression = { $_.FullName.Length } }, FullName
+    foreach ($file in $archives) {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($file.FullName)
+        try {
+            $entry = $archive.Entries |
+                Where-Object { $_.Name -ceq $Name } |
+                Sort-Object -Property @{ Expression = { $_.FullName.Length } }, FullName |
+                Select-Object -First 1
+            if ($null -eq $entry) { continue }
+
+            $reader = [System.IO.StreamReader]::new($entry.Open(), [System.Text.Encoding]::UTF8)
+            try {
+                return $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable -Depth 100
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+
+    return $null
+}
+
 function Get-CrapFacts {
     $directory = Get-ArtifactDirectory -Name $crapArtifact
     if (-not $directory) { return $null }
@@ -408,6 +443,7 @@ function Get-AnalysisFacts {
     $directory = Get-ArtifactDirectory -Name $qodanaArtifact
     if (-not $directory) { return $null }
     $sarif = Read-JsonFile -Directory $directory -Name 'qodana.sarif.json'
+    if ($null -eq $sarif) { $sarif = Read-JsonFileInArchive -Directory $directory -Name 'qodana.sarif.json' }
     if ($null -eq $sarif) { return $null }
 
     # The problems the code has now: new ones and those the baseline already knew. "absent" ones are gone.

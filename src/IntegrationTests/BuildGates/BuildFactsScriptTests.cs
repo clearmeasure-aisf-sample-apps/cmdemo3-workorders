@@ -155,6 +155,65 @@ public class BuildFactsScriptTests
     }
 
     [Test]
+    public void WriteBuildFacts_WhenTheQodanaReportIsAZipInTheArtifact_ReadsTheSarifInsideIt()
+    {
+        // What the Qodana action uploads: one qodana-report.zip with its results directory.
+        var artifacts = Path.Combine(_workDirectory, "zipped-qodana-artifacts");
+        WriteArtifacts(artifacts);
+        var report = Path.Combine(artifacts, "qodana-report");
+        File.Delete(Path.Combine(report, "qodana.sarif.json"));
+        using (var archive = ZipFile.Open(Path.Combine(report, "qodana-report.zip"), ZipArchiveMode.Create))
+        {
+            WriteEntry(archive, "log/idea.log", "started");
+            WriteEntry(archive, "qodana-short.sarif.json", Sarif("new"));
+            WriteEntry(archive, "report/index.html", "<html></html>");
+            WriteEntry(archive, "report/results/qodana.sarif.json", Sarif("new", "new"));
+            WriteEntry(archive, "qodana.sarif.json", Sarif("unchanged", "new", "absent", "unchanged", "unchanged", "new"));
+        }
+
+        using var facts = RunScript(artifacts, out var log);
+
+        facts.RootElement.GetProperty("analysis").GetProperty("qodanaProblems").GetInt32().ShouldBe(5);
+        log.ShouldContain("PASS analysis");
+        Directory.GetFileSystemEntries(report).Select(Path.GetFileName).ShouldBe(["qodana-report.zip"]);
+    }
+
+    [Test]
+    public void WriteBuildFacts_WhenTheZipInTheArtifactHasNoSarif_WritesNullForAnalysis()
+    {
+        var artifacts = Path.Combine(_workDirectory, "zip-without-sarif-artifacts");
+        WriteArtifacts(artifacts);
+        var report = Path.Combine(artifacts, "qodana-report");
+        File.Delete(Path.Combine(report, "qodana.sarif.json"));
+        using (var archive = ZipFile.Open(Path.Combine(report, "qodana-report.zip"), ZipArchiveMode.Create))
+        {
+            WriteEntry(archive, "qodana-short.sarif.json", Sarif("new"));
+        }
+
+        using var facts = RunScript(artifacts, out var log);
+
+        facts.RootElement.GetProperty("analysis").ValueKind.ShouldBe(JsonValueKind.Null);
+        facts.RootElement.GetProperty("tests").GetProperty("unit").GetInt32().ShouldBe(4);
+        log.ShouldContain("SKIP analysis: no input");
+    }
+
+    [Test]
+    public void WriteBuildFacts_WhenTheZipInTheArtifactIsUnreadable_WritesNullForAnalysisAndWarns()
+    {
+        var artifacts = Path.Combine(_workDirectory, "broken-zip-artifacts");
+        WriteArtifacts(artifacts);
+        var report = Path.Combine(artifacts, "qodana-report");
+        File.Delete(Path.Combine(report, "qodana.sarif.json"));
+        File.WriteAllText(Path.Combine(report, "qodana-report.zip"), "not a zip");
+
+        using var facts = RunScript(artifacts, out var log);
+
+        facts.RootElement.GetProperty("analysis").ValueKind.ShouldBe(JsonValueKind.Null);
+        facts.RootElement.GetProperty("crap").GetProperty("threshold").GetInt32().ShouldBe(6);
+        log.ShouldContain("::warning title=Build facts::The section 'analysis' could not be read");
+    }
+
+    [Test]
     public void WriteBuildFacts_WhenGivenAPackage_PutsTheFileInItsRoot()
     {
         var package = Path.Combine(_workDirectory, "example-ui.2.4.15.zip");
@@ -386,24 +445,15 @@ public class BuildFactsScriptTests
             "crap-metrics-linux/crap-production-violations.json",
             """{ "schemaVersion": "1.0", "threshold": 6, "violationCount": 0, "methods": [] }""");
 
-        WriteFile(
-            artifacts,
-            "qodana-report/qodana.sarif.json",
-            """
-            {
-              "version": "2.1.0",
-              "runs": [
-                {
-                  "results": [
-                    { "ruleId": "ConvertToPrimaryConstructor", "baselineState": "unchanged" },
-                    { "ruleId": "MergeIntoPattern", "baselineState": "unchanged" },
-                    { "ruleId": "UnusedMember.Global", "baselineState": "new" },
-                    { "ruleId": "RedundantUsingDirective", "baselineState": "absent" }
-                  ]
-                }
-              ]
-            }
-            """);
+        WriteFile(artifacts, "qodana-report/qodana.sarif.json", Sarif("unchanged", "unchanged", "new", "absent"));
+    }
+
+    // One result per baseline state, in the shape Qodana writes when it compares with a baseline.
+    private static string Sarif(params string[] baselineStates)
+    {
+        var results = baselineStates.Select(state =>
+            $$"""{ "ruleId": "ConvertToPrimaryConstructor", "baselineState": "{{state}}" }""");
+        return $$"""{ "version": "2.1.0", "runs": [ { "results": [ {{string.Join(", ", results)}} ] } ] }""";
     }
 
     private static string Trx(string assembly, int total, int executed) =>
