@@ -4,8 +4,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Serilog;
 
@@ -95,9 +97,11 @@ public static class Extensions
     }
 
     /// <summary>
-    /// Adds the OTLP exporter when the OTEL_EXPORTER_OTLP_ENDPOINT environment variable is set. It is the only
-    /// exporter: the service name and other resource attributes come from OTEL_SERVICE_NAME and
-    /// OTEL_RESOURCE_ATTRIBUTES, which the OpenTelemetry SDK reads by default.
+    /// Adds the exporters whose configuration is present; both may be active together.
+    /// APPLICATIONINSIGHTS_CONNECTION_STRING (set by the platform in Azure) turns on the Azure Monitor exporter,
+    /// which sends traces, metrics and logs to Application Insights. OTEL_EXPORTER_OTLP_ENDPOINT (set by the Aspire
+    /// AppHost locally) turns on the OTLP exporter. The service name and other resource attributes come from
+    /// OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
     /// </summary>
     private static void AddOpenTelemetryExporters<TBuilder>(this TBuilder builder, OpenTelemetryBuilder otelBuilder) where TBuilder : IHostApplicationBuilder
     {
@@ -106,6 +110,18 @@ public static class Extensions
         if (useOtlpExporter)
         {
             otelBuilder.UseOtlpExporter();
+        }
+
+        var useAzureMonitorExporter = !string.IsNullOrWhiteSpace(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]);
+
+        if (useAzureMonitorExporter)
+        {
+            otelBuilder.UseAzureMonitor();
+
+            // UseAzureMonitor adds the App Service, Container Apps and VM resource detectors after the SDK's own
+            // OTEL_RESOURCE_ATTRIBUTES / OTEL_SERVICE_NAME detectors, so the site or container app name would
+            // replace service.name. Applying the OTEL_* variables again, last, keeps the name the platform sets.
+            otelBuilder.ConfigureResource(resource => resource.AddEnvironmentVariableDetector());
         }
     }
 
